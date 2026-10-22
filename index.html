@@ -2,31 +2,35 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <title>Media Tracker</title>
-  <style>
-    * {
-      margin: 0;
-      padding: 0;
-      box-sizing: border-box;
-    }
-    html, body {
-      width: 100%;
-      height: 100%;
-      height: 100dvh;
-      background-color: #090d16;
-      overflow: hidden;
-    }
-    iframe {
-      width: 100%;
-      height: 100%;
-      border: none;
-      display: block;
-    }
-  </style>
+  <!-- Your CSS styles here -->
 </head>
 <body>
-  <iframe src="https://script.google.com/macros/s/AKfycbwm1BzsbFDhV7daY7bz5zUewM1B10RXwnAA5oDfBM3ZUk5kL6aVzf6QtgafjM4g7P1p/exec
-"></iframe>
+  <div id="loading">Loading media tracker from spreadsheet...</div>
+
+  <script>
+    var GAS_URL = 'https://script.google.com/macros/s/AKfycbwm1BzsbFDhV7daY7bz5zUewM1B10RXwnAA5oDfBM3ZUk5kL6aVzf6QtgafjM4g7P1p/exec';
+
+    // Fetch data from Google Sheets via Apps Script API
+    fetch(GAS_URL)
+      .then(response => response.json())
+      .then(data => {
+        if (data.error) {
+          document.getElementById('loading').innerText = "Error: " + data.error;
+          return;
+        }
+        // Hide loading screen and pass data to your app initializer
+        document.getElementById('loading').style.display = 'none';
+        initializeApp(data);
+      })
+      .catch(err => {
+        document.getElementById('loading').innerText = "Connection failed: " + err;
+      });
+
+    function initializeApp(rawData) {
+      console.log("Data loaded successfully!", rawData);
+      // Your full rendering and app logic goes here
+    }
+  </script>
 </body>
 </html>
