@@ -12,20 +12,20 @@
     var GAS_URL = 'https://script.google.com/macros/s/AKfycbwm1BzsbFDhV7daY7bz5zUewM1B10RXwnAA5oDfBM3ZUk5kL6aVzf6QtgafjM4g7P1p/exec';
 
     // Fetch data from Google Sheets via Apps Script API
-    fetch(GAS_URL)
-      .then(response => response.json())
-      .then(data => {
-        if (data.error) {
-          document.getElementById('loading').innerText = "Error: " + data.error;
-          return;
-        }
-        // Hide loading screen and pass data to your app initializer
-        document.getElementById('loading').style.display = 'none';
-        initializeApp(data);
-      })
-      .catch(err => {
-        document.getElementById('loading').innerText = "Connection failed: " + err;
-      });
+        fetch(GAS_URL)
+          .then(response => response.json())
+          .then(data => {
+            if (data.error) {
+              document.getElementById('loading').innerText = "Error: " + data.error;
+              return;
+            }
+            // Pass the fetched data directly into your existing onDataLoaded function
+            onDataLoaded(data);
+          })
+          .catch(err => {
+            document.getElementById('loading').innerText = "Connection failed: " + err;
+            console.error(err);
+          });
 
     function initializeApp(rawData) {
       console.log("Data loaded successfully!", rawData);
