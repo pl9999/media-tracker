@@ -1,6 +1,6 @@
     var rawData = { movies: [], tvShows: [], movieSuggestions: [], tvSuggestions: [] };
     /* ================================================================
-       v1.2
+       v1.3
        Configuration: set GAS_URL to your Apps Script web app URL
        (…/macros/s/…/exec). It is not a secret: every request must also
        carry the access code, which is entered once on each device and
@@ -14,6 +14,9 @@
     function getAccessCode() {
       if (memoryAccessCode) return memoryAccessCode;
       try { return localStorage.getItem(ACCESS_KEY) || ''; } catch (e) { return ''; }
+    }
+    function isCodeSavedOnDevice() {
+      try { var c = getAccessCode(); return !!c && localStorage.getItem(ACCESS_KEY) === c; } catch (e) { return false; }
     }
     /* A newly typed code lives in memory only until the server accepts it (see applyLoadedData). */
     function persistAccessCode() {
@@ -111,7 +114,7 @@
     var currentCategory = 'tv';
     var currentViewMode = 'list';
     var activeSubMenu = 'main';
-    
+
     var selectedTvStatuses = {
       'history': false,
       'watch-next': true,
@@ -180,7 +183,8 @@
       loader.style.display = 'block';
       loader.style.color = 'var(--text-sub)';
       // rebuilt every time: an earlier error message may have replaced the contents
-      loader.innerHTML = '<div id="loadingText">Loading library from Google Sheets...</div>' +
+      var checking = !isCodeSavedOnDevice();   // a freshly typed code is still being verified
+      loader.innerHTML = '<div id="loadingText">' + (checking ? 'Checking access code\u2026' : 'Loading library from Google Sheets...') + '</div>' +
         '<div class="progress-track"><div class="progress-fill" id="loadingFill"></div></div>';
       document.getElementById('mediaGrid').style.display = 'none';
       loadProgress = startProgress(document.getElementById('loadingFill'));
@@ -192,7 +196,11 @@
 
     function onDataError(err) {
       if (loadProgress) { loadProgress.cancel(); loadProgress = null; }
-      if (err && err.unauthorized) return; // the access-code prompt is already showing
+      if (err && err.unauthorized) {
+        // code rejected: the access-code prompt is showing; remove the loader and its progress bar
+        document.getElementById('loading').style.display = 'none';
+        return;
+      }
       var loader = document.getElementById('loading');
       loader.style.color = '#ff3b30';
       var msg = (err && err.message) || String(err);
@@ -409,7 +417,7 @@
 
         var genresList = getAllGenres();
         html += '<div class="popover-item" data-act="setGenreFilter" data-a="all"><span>' + (selectedGenre === 'all' ? '✓ ' : '') + 'All genres</span></div>';
-        
+
         genresList.forEach(function(g) {
           html += '<div class="popover-item" data-act="setGenreFilter" data-a="' + escapeHtml(g) + '"><span>' + (selectedGenre === g ? '✓ ' : '') + escapeHtml(g) + '</span></div>';
         });
@@ -601,7 +609,7 @@
         renderSuggestionsView(grid, search, activeMode);
       }
 
-      var shouldScrollToBottom = (currentCategory === 'tv' && selectedTvStatuses['history']) || 
+      var shouldScrollToBottom = (currentCategory === 'tv' && selectedTvStatuses['history']) ||
                                  (currentCategory === 'movies' && selectedMovieStatuses['watched'] && selectedMovieSort === 'watched-asc');
       if (shouldScrollToBottom) {
         requestAnimationFrame(function() {
@@ -1001,7 +1009,7 @@ function renderTvSectionGroup(container, sectionTitle, items, viewMode, isHistor
     if (viewMode === 'grid') {
       card = document.createElement('div');
       card.className = 'bingers-grid-card' + (isHistory ? ' is-history-item' : '');
-      
+
       var epTagStr = item.nextEpTag || (isAllAz ? (item.watchedEps + '/' + item.totalEps + ' eps') : 'S01E01');
       var epTitleText = item.nextEpTitle ? ' · ' + item.nextEpTitle : '';
 
@@ -1015,7 +1023,7 @@ function renderTvSectionGroup(container, sectionTitle, items, viewMode, isHistor
     } else {
       card = document.createElement('div');
       card.className = 'bingers-list-card' + (isHistory ? ' is-history-item' : '');
-      
+
       var isWatched = isAllAz ? item.isFullyWatched : !!item.isWatched;
       var epTag = item.nextEpTag || (isAllAz ? (item.watchedEps + '/' + item.totalEps + ' watched') : 'S01 E01');
       var seqStr = item.nextEpSeqStr || (item.totalEps ? ('1/' + item.totalEps) : '');
@@ -1522,7 +1530,7 @@ function renderTvSectionGroup(container, sectionTitle, items, viewMode, isHistor
 function toggleWatchedDirectly(event, sheetName, rowIndex, isWatched) {
   event.stopPropagation();
   var newWatched = !isWatched;
-  
+
   var btn = event.currentTarget;
   var card = btn.closest('.bingers-list-card') || btn.closest('.bingers-grid-card');
 
