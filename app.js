@@ -1,5 +1,6 @@
     var rawData = { movies: [], tvShows: [], movieSuggestions: [], tvSuggestions: [] };
     /* ================================================================
+       v1.2
        Configuration: set GAS_URL to your Apps Script web app URL
        (…/macros/s/…/exec). It is not a secret: every request must also
        carry the access code, which is entered once on each device and
@@ -11,11 +12,14 @@
     var memoryAccessCode = '';
 
     function getAccessCode() {
-      try { return localStorage.getItem(ACCESS_KEY) || memoryAccessCode; } catch (e) { return memoryAccessCode; }
+      if (memoryAccessCode) return memoryAccessCode;
+      try { return localStorage.getItem(ACCESS_KEY) || ''; } catch (e) { return ''; }
     }
-    function setAccessCode(v) {
-      memoryAccessCode = v;
-      try { localStorage.setItem(ACCESS_KEY, v); } catch (e) {}
+    /* A newly typed code lives in memory only until the server accepts it (see applyLoadedData). */
+    function persistAccessCode() {
+      var c = getAccessCode();
+      if (!c) return;
+      try { localStorage.setItem(ACCESS_KEY, c); } catch (e) {}
     }
     function clearAccessCode() {
       memoryAccessCode = '';
@@ -23,6 +27,11 @@
     }
 
     function gasCall(action, args) {
+      if (!/^https:\/\/script\.google\.com\//.test(GAS_URL)) {
+        var cfg = new Error('GAS_URL is not set. Open app.js and paste your web app URL (https://script.google.com/macros/s/.../exec) at the top.');
+        cfg.config = true;
+        return Promise.reject(cfg);
+      }
       return fetch(GAS_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'text/plain;charset=utf-8' },
@@ -81,7 +90,7 @@
       var input = document.getElementById('loginInput');
       var code = input.value.trim();
       if (!code) return;
-      setAccessCode(code);
+      memoryAccessCode = code;
       input.value = '';
       document.getElementById('loginOverlay').classList.remove('show');
       startLoad();
@@ -102,7 +111,7 @@
     var currentCategory = 'tv';
     var currentViewMode = 'list';
     var activeSubMenu = 'main';
-
+    
     var selectedTvStatuses = {
       'history': false,
       'watch-next': true,
@@ -170,6 +179,9 @@
       var loader = document.getElementById('loading');
       loader.style.display = 'block';
       loader.style.color = 'var(--text-sub)';
+      // rebuilt every time: an earlier error message may have replaced the contents
+      loader.innerHTML = '<div id="loadingText">Loading library from Google Sheets...</div>' +
+        '<div class="progress-track"><div class="progress-fill" id="loadingFill"></div></div>';
       document.getElementById('mediaGrid').style.display = 'none';
       loadProgress = startProgress(document.getElementById('loadingFill'));
       GAS.run
@@ -183,12 +195,18 @@
       if (err && err.unauthorized) return; // the access-code prompt is already showing
       var loader = document.getElementById('loading');
       loader.style.color = '#ff3b30';
-      loader.innerHTML = 'Failed to load library.<br><br>' + escapeHtml((err && err.message) || err) +
-        '<br><br><button class="action-sheet-btn" style="width:auto; background:var(--accent-red); font-weight:600;" data-act="reloadPage">Try again</button>';
+      var msg = (err && err.message) || String(err);
+      if (!(err && err.config) && (!err || err.name === 'TypeError' || /load failed|failed to fetch|network/i.test(msg))) {
+        msg = 'Could not reach the server (' + msg + '). Check your connection. If it keeps happening, check that GAS_URL in app.js is your web app URL and that the web app is deployed with access set to "Anyone".';
+      }
+      loader.innerHTML = 'Failed to load library.<br><br>' + escapeHtml(msg) +
+        '<br><br><button class="action-sheet-btn" style="width:auto; background:var(--accent-red); font-weight:600;" data-act="reloadPage">Try again</button>' +
+        '<br><button class="action-sheet-btn" style="width:auto; margin-top:0.5rem;" data-act="changeCode">Enter a different access code</button>';
     }
 
     function applyLoadedData(data) {
       rawData = data;
+      persistAccessCode();
       lastLoadedAt = new Date();
       if (data.settings && !settingsDirty) {
         appSettings.resumeWeeks = data.settings.resumeWeeks || appSettings.resumeWeeks;
@@ -391,7 +409,7 @@
 
         var genresList = getAllGenres();
         html += '<div class="popover-item" data-act="setGenreFilter" data-a="all"><span>' + (selectedGenre === 'all' ? '✓ ' : '') + 'All genres</span></div>';
-
+        
         genresList.forEach(function(g) {
           html += '<div class="popover-item" data-act="setGenreFilter" data-a="' + escapeHtml(g) + '"><span>' + (selectedGenre === g ? '✓ ' : '') + escapeHtml(g) + '</span></div>';
         });
@@ -583,7 +601,7 @@
         renderSuggestionsView(grid, search, activeMode);
       }
 
-      var shouldScrollToBottom = (currentCategory === 'tv' && selectedTvStatuses['history']) ||
+      var shouldScrollToBottom = (currentCategory === 'tv' && selectedTvStatuses['history']) || 
                                  (currentCategory === 'movies' && selectedMovieStatuses['watched'] && selectedMovieSort === 'watched-asc');
       if (shouldScrollToBottom) {
         requestAnimationFrame(function() {
@@ -983,7 +1001,7 @@ function renderTvSectionGroup(container, sectionTitle, items, viewMode, isHistor
     if (viewMode === 'grid') {
       card = document.createElement('div');
       card.className = 'bingers-grid-card' + (isHistory ? ' is-history-item' : '');
-
+      
       var epTagStr = item.nextEpTag || (isAllAz ? (item.watchedEps + '/' + item.totalEps + ' eps') : 'S01E01');
       var epTitleText = item.nextEpTitle ? ' · ' + item.nextEpTitle : '';
 
@@ -997,7 +1015,7 @@ function renderTvSectionGroup(container, sectionTitle, items, viewMode, isHistor
     } else {
       card = document.createElement('div');
       card.className = 'bingers-list-card' + (isHistory ? ' is-history-item' : '');
-
+      
       var isWatched = isAllAz ? item.isFullyWatched : !!item.isWatched;
       var epTag = item.nextEpTag || (isAllAz ? (item.watchedEps + '/' + item.totalEps + ' watched') : 'S01 E01');
       var seqStr = item.nextEpSeqStr || (item.totalEps ? ('1/' + item.totalEps) : '');
@@ -1504,7 +1522,7 @@ function renderTvSectionGroup(container, sectionTitle, items, viewMode, isHistor
 function toggleWatchedDirectly(event, sheetName, rowIndex, isWatched) {
   event.stopPropagation();
   var newWatched = !isWatched;
-
+  
   var btn = event.currentTarget;
   var card = btn.closest('.bingers-list-card') || btn.closest('.bingers-grid-card');
 
@@ -1900,6 +1918,7 @@ let currentDetailItem = null;
     var ACTIONS = {
       noop: function() {},
       reloadPage: function() { location.reload(); },
+      changeCode: function() { clearAccessCode(); document.getElementById('loading').style.display = 'none'; showLogin(''); },
       submitLogin: function() { submitLogin(); },
       lockDevice: function() { lockDevice(); },
 
@@ -1961,7 +1980,7 @@ let currentDetailItem = null;
       // one-time convenience: https://…/media-tracker/#<access code> stores the code, then removes it from the address bar
       var h = (location.hash || '').replace(/^#/, '');
       if (/^[A-Za-z0-9]{16,64}$/.test(h)) {
-        setAccessCode(h);
+        memoryAccessCode = h;
         try { history.replaceState(null, '', location.pathname + location.search); } catch (e) {}
       }
       if (getAccessCode()) startLoad();
