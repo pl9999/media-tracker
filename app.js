@@ -6,7 +6,7 @@
        carry the access code, which is entered once on each device and
        is never stored in this repository.
        ================================================================ */
-    var GAS_URL = 'https://pl9999.github.io/media-tracker/';
+    var GAS_URL = 'https://script.google.com/macros/s/AKfycbwfd2iJxgw95mahjKQc7hVh-8XIs18hO2nxfTW8Ogww7JdhP_cOxWwGI5g8t3uSf8A1/exec';
 
     var ACCESS_KEY = 'mt_access_code';
     var memoryAccessCode = '';
