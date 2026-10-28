@@ -1,6 +1,5 @@
-    var rawData = { movies: [], tvShows: [], movieSuggestions: [], tvSuggestions: [] };
+    var rawData = { movies: [], tvShows: [], movieRecommendations: [], tvRecommendations: [] };
     /* ================================================================
-       v1.3
        Configuration: set GAS_URL to your Apps Script web app URL
        (…/macros/s/…/exec). It is not a secret: every request must also
        carry the access code, which is entered once on each device and
@@ -62,6 +61,7 @@
             if (name === 'withFailureHandler') return function(fn) { onFail = fn; return proxy; };
             return function() {
               var args = Array.prototype.slice.call(arguments);
+              if (QUEUEABLE[name]) { queueableCall(String(name), args, onOk, onFail); return; }
               gasCall(String(name), args).then(
                 function(res) { onOk(res); },
                 function(err) {
@@ -101,7 +101,8 @@
 
     function lockDevice() {
       clearAccessCode();
-      rawData = { movies: [], tvShows: [], movieSuggestions: [], tvSuggestions: [] };
+      clearSnapshot();
+      rawData = { movies: [], tvShows: [], movieRecommendations: [], tvRecommendations: [] };
       document.getElementById('mediaGrid').innerHTML = '';
       showLogin('');
     }
@@ -114,7 +115,7 @@
     var currentCategory = 'tv';
     var currentViewMode = 'list';
     var activeSubMenu = 'main';
-
+    
     var selectedTvStatuses = {
       'history': false,
       'watch-next': true,
@@ -201,6 +202,11 @@
         document.getElementById('loading').style.display = 'none';
         return;
       }
+      if (isNetworkError(err) && loadSnapshot()) {
+        showLibrary();
+        showToast('Offline \u2013 showing your last saved data');
+        return;
+      }
       var loader = document.getElementById('loading');
       loader.style.color = '#ff3b30';
       var msg = (err && err.message) || String(err);
@@ -213,8 +219,10 @@
     }
 
     function applyLoadedData(data) {
+      applyPendingToData(data);   // updates made offline stay visible until they have synced
       rawData = data;
       persistAccessCode();
+      saveSnapshot();
       lastLoadedAt = new Date();
       if (data.settings && !settingsDirty) {
         appSettings.resumeWeeks = data.settings.resumeWeeks || appSettings.resumeWeeks;
@@ -233,6 +241,8 @@
     }
 
     function showLibrary() {
+      flushQueueSoon();
+      updateSyncBanner();
       document.getElementById('loading').style.display = 'none';
       document.getElementById('mediaGrid').style.display = 'flex';
       renderCurrentCategoryView();
@@ -417,7 +427,7 @@
 
         var genresList = getAllGenres();
         html += '<div class="popover-item" data-act="setGenreFilter" data-a="all"><span>' + (selectedGenre === 'all' ? '✓ ' : '') + 'All genres</span></div>';
-
+        
         genresList.forEach(function(g) {
           html += '<div class="popover-item" data-act="setGenreFilter" data-a="' + escapeHtml(g) + '"><span>' + (selectedGenre === g ? '✓ ' : '') + escapeHtml(g) + '</span></div>';
         });
@@ -519,9 +529,11 @@
           '</div>';
 
         pop.innerHTML = viewRowHtml + sortHtml + movieStatusHtml + genreItemHtml;
+      } else if (currentCategory === 'calendar') {
+        pop.innerHTML = calendarPopoverHtml();
       } else {
         var exploreOptions = [
-          { key: 'shows', label: 'Show recommendations' },
+          { key: 'shows', label: 'TV show recommendations' },
           { key: 'movies', label: 'Movie recommendations' }
         ];
 
@@ -579,8 +591,8 @@
 
     function getAllGenres() {
       var set = {};
-      var all = (currentCategory === 'suggestions')
-        ? (rawData.movieSuggestions || []).concat(rawData.tvSuggestions || [])
+      var all = (currentCategory === 'explore')
+        ? (rawData.movieRecommendations || []).concat(rawData.tvRecommendations || [])
         : rawData.movies.concat(rawData.tvShows);
       all.forEach(function(i) {
         if (i.genre && i.genre !== 'N/A') {
@@ -605,11 +617,13 @@
         renderMoviesView(grid, search, activeMode);
       } else if (currentCategory === 'settings') {
         renderSettingsView(grid);
+      } else if (currentCategory === 'calendar') {
+        renderCalendarView(grid, search);
       } else {
-        renderSuggestionsView(grid, search, activeMode);
+        renderRecommendationsView(grid, search, activeMode);
       }
 
-      var shouldScrollToBottom = (currentCategory === 'tv' && selectedTvStatuses['history']) ||
+      var shouldScrollToBottom = (currentCategory === 'tv' && selectedTvStatuses['history']) || 
                                  (currentCategory === 'movies' && selectedMovieStatuses['watched'] && selectedMovieSort === 'watched-asc');
       if (shouldScrollToBottom) {
         requestAnimationFrame(function() {
@@ -765,7 +779,7 @@
       return true;
     }
 
-    function renderSuggestionsView(container, search, viewMode) {
+    function renderRecommendationsView(container, search, viewMode) {
       container.className = viewMode === 'grid' ? 'grid' : 'list-normal';
 
       if (!selectedExplore.shows && !selectedExplore.movies) {
@@ -775,24 +789,45 @@
           '<div class="explore-empty-title">Explore recommendations</div>' +
           '<div class="explore-empty-desc">Choose a list to browse, or use the menu button at the top left.</div>' +
           '<div class="explore-empty-actions">' +
-          '<button class="action-sheet-btn" style="background:var(--accent-red); font-weight:600;" data-act="toggleExploreOption" data-a="shows">Show recommendations</button>' +
+          '<button class="action-sheet-btn" style="background:var(--accent-red); font-weight:600;" data-act="toggleExploreOption" data-a="shows">TV show recommendations</button>' +
           '<button class="action-sheet-btn" style="background:var(--accent-red); font-weight:600;" data-act="toggleExploreOption" data-a="movies">Movie recommendations</button>' +
           '</div></div>';
         return;
       }
 
       if (selectedExplore.shows) {
-        // The TV suggestions sheet has show header rows followed by season / episode rows; only headers are shown.
-        var showRecs = parseTVShowBlocks(rawData.tvSuggestions || [])
+        // The TV show recommendations sheet has show header rows followed by season / episode rows; only headers are shown.
+        var showRecs = parseTVShowBlocks(rawData.tvRecommendations || [])
           .map(function(b) { return b.show; })
           .filter(function(s) { return matchesSearchAndGenre(s, search); });
-        renderRecommendationGroup(container, 'Show recommendations', showRecs, viewMode, 'tv');
+        renderRecommendationGroup(container, 'TV show recommendations', showRecs, viewMode, 'tv');
       }
       if (selectedExplore.movies) {
-        var movieRecs = (rawData.movieSuggestions || [])
+        var movieRecs = (rawData.movieRecommendations || [])
           .filter(function(m) { return matchesSearchAndGenre(m, search); });
         renderRecommendationGroup(container, 'Movie recommendations', movieRecs, viewMode, 'movie');
       }
+    }
+
+    function recButtonsHtml(typeStr, id) {
+      var base = ' data-act="recAction" data-a="' + typeStr + '" data-b="' + id + '"';
+      return '<div class="rec-actions">' +
+        '<button class="rec-btn rec-add"' + base + ' data-c="add" title="Add to list" aria-label="Add to list">' +
+          '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><line x1="12" y1="8" x2="12" y2="16"/><line x1="8" y1="12" x2="16" y2="12"/></svg></button>' +
+        '<button class="rec-btn rec-watched"' + base + ' data-c="watched" title="Watched" aria-label="Mark as watched">' +
+          '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><polyline points="8 12.5 11 15.5 16 9.5"/></svg></button>' +
+        '<button class="rec-btn rec-remove"' + base + ' data-c="remove" title="Remove" aria-label="Remove from recommendations">' +
+          '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><line x1="9" y1="9" x2="15" y2="15"/><line x1="15" y1="9" x2="9" y2="15"/></svg></button>' +
+        '</div>';
+    }
+
+    function movieCreditLine(item) {
+      var parts = [];
+      var dir = item.director && !/^(n\/a|tbc)$/i.test(item.director) ? item.director : '';
+      if (dir) parts.push('Dir. ' + dir);
+      var cast = (item.stars || '').split(',').map(function(s) { return s.trim(); }).filter(function(s) { return s && !/^(n\/a|tbc)$/i.test(s); }).slice(0, 3);
+      if (cast.length) parts.push('Cast: ' + cast.join(', '));
+      return parts.join(' · ');
     }
 
     function renderRecommendationGroup(container, sectionTitle, items, viewMode, typeStr) {
@@ -823,13 +858,15 @@
         var card = document.createElement('div');
         var yr = isMovie ? yearOf(item.date) : '';
         var genreText = (item.genre && item.genre !== 'N/A') ? item.genre : '';
+        var safeId = String(item.tmdbId || '').replace(/\D/g, '');
+        var actions = safeId ? recButtonsHtml(typeStr, safeId) : '';
 
         if (viewMode === 'grid') {
           var gridSub = isMovie ? yr : (genreText ? genreText.split(',')[0].trim() : '');
           card.className = 'bingers-grid-card';
           card.innerHTML = '<img class="grid-poster" src="' + blankPoster + '" alt="">' +
             '<div class="grid-card-title' + (isMovie ? ' title-tight' : '') + '">' + escapeHtml(item.title) + '</div>' +
-            '<div class="grid-card-sub">' + escapeHtml(gridSub) + '</div>';
+            '<div class="grid-card-sub">' + escapeHtml(gridSub) + '</div>' + actions;
         } else {
           var bits = [];
           if (isMovie) {
@@ -838,16 +875,20 @@
           } else if (genreText) {
             bits.push(genreText);
           }
-          if (item.imdbRating && item.imdbRating !== 'TBC') bits.push('IMDb ' + item.imdbRating);
-          else if (item.rating && item.rating !== 'TBC') bits.push('TMDB ' + item.rating);
+          if (item.imdbRating && item.imdbRating !== 'TBC') bits.push('⭐ ' + item.imdbRating);
+          if (item.rtRating && item.rtRating !== 'TBC') bits.push('🍅 ' + item.rtRating);
+          else if (item.tmdbRating && item.tmdbRating !== 'TBC') bits.push('TMDB ' + item.tmdbRating);
+
+          var credits = isMovie ? movieCreditLine(item) : '';
 
           card.className = 'bingers-list-card';
           card.innerHTML = '<img class="card-poster" src="' + blankPoster + '" alt="">' +
             '<div class="card-info">' +
             '<div class="card-title-text">' + escapeHtml(item.title) + '</div>' +
             '<div class="card-subline">' + escapeHtml(bits.join(' · ')) + '</div>' +
+            (credits ? '<div class="card-credits-line">' + escapeHtml(credits) + '</div>' : '') +
             '<div class="card-synopsis-line">' + escapeHtml(item.synopsis || 'No overview available.') + '</div>' +
-            '</div>';
+            '</div>' + actions;
         }
 
         targetParent.appendChild(card);
@@ -861,12 +902,46 @@
             date: item.date || '',
             synopsis: item.synopsis || '',
             genre: item.genre || '',
-            rating: item.rating || '',
+            rtRating: item.rtRating || '',
+            tmdbRating: item.tmdbRating || '',
             imdbRating: item.imdbRating || '',
             runtime: item.runtime || ''
           });
         };
       });
+    }
+
+    /* Quick actions on a recommendation: add to list / mark watched / remove */
+    function recAction(typeStr, id, action, btn) {
+      if (!navigator.onLine) { showToast('You need to be online to do that'); return; }
+      var card = btn.closest('.bingers-list-card') || btn.closest('.bingers-grid-card');
+      if (card && card.dataset.busy === '1') return;
+      var titleEl = card ? (card.querySelector('.card-title-text') || card.querySelector('.grid-card-title')) : null;
+      var title = titleEl ? titleEl.textContent : 'Item';
+      if (card) { card.dataset.busy = '1'; card.style.opacity = '0.6'; }
+      if (action !== 'remove') showAddPopup('loading', title, typeStr);
+
+      GAS.run
+        .withSuccessHandler(function(res) {
+          if (card) card.dataset.busy = '0';
+          if (res && res.success) {
+            if (action === 'remove') showToast(res.message || 'Removed');
+            else showAddPopup('success', res.title || title, typeStr, null, res.message);
+            if (card) card.classList.add('animating-out');
+            setTimeout(refreshDataQuietly, 350);   // refresh the recommendations lists
+          } else {
+            if (card) card.style.opacity = '';
+            var msg = (res && res.message) || 'Something went wrong';
+            if (action === 'remove') showToast(msg); else showAddPopup('error', title, typeStr, msg);
+            refreshDataQuietly();
+          }
+        })
+        .withFailureHandler(function(err) {
+          if (card) { card.dataset.busy = '0'; card.style.opacity = ''; }
+          var msg = (err && err.message) || 'Something went wrong';
+          if (action === 'remove') showToast(msg); else showAddPopup('error', title, typeStr, msg);
+        })
+        .apiRecommendationAction(typeStr, id, action);
     }
 
     /* ---------- Settings ---------- */
@@ -1009,7 +1084,7 @@ function renderTvSectionGroup(container, sectionTitle, items, viewMode, isHistor
     if (viewMode === 'grid') {
       card = document.createElement('div');
       card.className = 'bingers-grid-card' + (isHistory ? ' is-history-item' : '');
-
+      
       var epTagStr = item.nextEpTag || (isAllAz ? (item.watchedEps + '/' + item.totalEps + ' eps') : 'S01E01');
       var epTitleText = item.nextEpTitle ? ' · ' + item.nextEpTitle : '';
 
@@ -1023,7 +1098,7 @@ function renderTvSectionGroup(container, sectionTitle, items, viewMode, isHistor
     } else {
       card = document.createElement('div');
       card.className = 'bingers-list-card' + (isHistory ? ' is-history-item' : '');
-
+      
       var isWatched = isAllAz ? item.isFullyWatched : !!item.isWatched;
       var epTag = item.nextEpTag || (isAllAz ? (item.watchedEps + '/' + item.totalEps + ' watched') : 'S01 E01');
       var seqStr = item.nextEpSeqStr || (item.totalEps ? ('1/' + item.totalEps) : '');
@@ -1050,7 +1125,7 @@ function renderTvSectionGroup(container, sectionTitle, items, viewMode, isHistor
         type: 'tv',
         synopsis: item.synopsis || '',
         genre: item.genre || '',
-        rating: item.rating || '',
+        rtRating: item.rtRating || '', tmdbRating: item.tmdbRating || '',
         imdbRating: item.imdbRating || ''
       });
     };
@@ -1100,6 +1175,7 @@ function renderTvSectionGroup(container, sectionTitle, items, viewMode, isHistor
       '<div class="card-info">' +
       '<div class="card-title-text">' + escapeHtml(item.title) + '</div>' +
       '<div class="card-subline">' + escapeHtml(sublineStr) + '</div>' +
+      (movieCreditLine(item) ? '<div class="card-credits-line">' + escapeHtml(movieCreditLine(item)) + '</div>' : '') +
       '<div class="card-synopsis-line">' + escapeHtml(item.synopsis || 'No overview available.') + '</div>' +
       '</div>' +
       '<button class="tick-action-btn" data-act="toggleWatchedDirectly" data-a="' + escapeHtml(item.sheetName) + '" data-b="' + (parseInt(item.rowIndex, 10) || 0) + '" data-c="' + (isWatched ? 'true' : 'false') + '">' +
@@ -1118,7 +1194,7 @@ function renderTvSectionGroup(container, sectionTitle, items, viewMode, isHistor
         date: item.date,
         synopsis: item.synopsis || '',
         genre: item.genre || '',
-        rating: item.rating || '',
+        rtRating: item.rtRating || '', tmdbRating: item.tmdbRating || '',
         imdbRating: item.imdbRating || '',
         runtime: item.runtime || ''
       });
@@ -1374,7 +1450,7 @@ function renderTvSectionGroup(container, sectionTitle, items, viewMode, isHistor
                 type: type,
                 date: isoToDMY(item.date),
                 synopsis: item.overview || '',
-                rating: item.rating || ''
+                rtRating: item.rtRating || '', tmdbRating: item.tmdbRating || ''
               });
             };
 
@@ -1434,7 +1510,7 @@ function renderTvSectionGroup(container, sectionTitle, items, viewMode, isHistor
     var AP_CHECK = '<svg viewBox="0 0 52 52" width="76" height="76"><circle class="ap-circle" cx="26" cy="26" r="24" fill="none" stroke="#34c759" stroke-width="3"/><path class="ap-check" fill="none" stroke="#34c759" stroke-width="4" stroke-linecap="round" stroke-linejoin="round" d="M14 27l8 8 16-17"/></svg>';
     var AP_ERROR = '<svg viewBox="0 0 52 52" width="76" height="76"><circle class="ap-circle" cx="26" cy="26" r="24" fill="none" stroke="#ff3b30" stroke-width="3"/><path class="ap-check" fill="none" stroke="#ff3b30" stroke-width="4" stroke-linecap="round" d="M17 17l18 18M35 17L17 35"/></svg>';
 
-    function showAddPopup(state, title, type, errMsg) {
+    function showAddPopup(state, title, type, errMsg, note) {
       var overlay = document.getElementById('addPopupOverlay');
       var icon = document.getElementById('addPopupIcon');
       var titleEl = document.getElementById('addPopupTitle');
@@ -1455,7 +1531,7 @@ function renderTvSectionGroup(container, sectionTitle, items, viewMode, isHistor
         void icon.offsetWidth;
         icon.className = 'add-popup-icon pop';
         titleEl.textContent = 'Added to your library';
-        msgEl.textContent = shown + ' was added to ' + (isMovie ? 'Movies' : 'Shows') + '.';
+        msgEl.textContent = note || (shown + ' was added to ' + (isMovie ? 'Movies' : 'TV shows') + '.');
         addPopupTimer = setTimeout(hideAddPopup, 2800);
       } else {
         icon.className = 'add-popup-icon';
@@ -1530,7 +1606,7 @@ function renderTvSectionGroup(container, sectionTitle, items, viewMode, isHistor
 function toggleWatchedDirectly(event, sheetName, rowIndex, isWatched) {
   event.stopPropagation();
   var newWatched = !isWatched;
-
+  
   var btn = event.currentTarget;
   var card = btn.closest('.bingers-list-card') || btn.closest('.bingers-grid-card');
 
@@ -1635,8 +1711,14 @@ let currentDetailItem = null;
 
       var synopsis = tmdbData ? (tmdbData.overview || item.synopsis || 'No synopsis available.') : (item.synopsis || 'No synopsis available.');
       var genres = tmdbData && tmdbData.genres ? tmdbData.genres.map(function(g) { return g.name; }).join(' · ') : (item.genre || 'Drama');
-      var tmdbRating = tmdbData && tmdbData.vote_average ? tmdbData.vote_average.toFixed(1) : (item.rating && item.rating !== 'TBC' ? item.rating : '\u2014');
-      var imdbRating = item.imdbRating && item.imdbRating !== 'TBC' ? item.imdbRating : '\u2014';
+      var omdb = (tmdbData && tmdbData.omdb) || {};
+      var rowSrc = matchingSheetRow || {};   // ratings in your spreadsheet win over a live lookup
+      var shownImdb = item.imdbRating || rowSrc.imdbRating;
+      var shownRt = item.rtRating || rowSrc.rtRating;
+      var shownTmdb = item.tmdbRating || rowSrc.tmdbRating;
+      var imdbRating = (shownImdb && shownImdb !== 'TBC') ? shownImdb : ((omdb.imdb && omdb.imdb !== 'TBC') ? omdb.imdb : '\u2014');
+      var rtText = (shownRt && shownRt !== 'TBC') ? shownRt : ((typeof omdb.rt === 'number') ? omdb.rt + '%' : '');
+      var legacyTmdb = (!rtText && shownTmdb && shownTmdb !== 'TBC') ? shownTmdb : '';
       var imdbId = (tmdbData && tmdbData.external_ids && /^tt\d+$/.test(tmdbData.external_ids.imdb_id || '')) ? tmdbData.external_ids.imdb_id : '';
 
       var html = '<div class="detail-actions-row">';
@@ -1665,7 +1747,8 @@ let currentDetailItem = null;
 
       html += '<div class="detail-ratings-row">' +
               '<div class="rating-badge">⭐ ' + escapeHtml(imdbRating) + '</div>' +
-              '<div class="rating-badge">TMDB ' + escapeHtml(tmdbRating) + '</div>' +
+              (rtText ? '<div class="rating-badge">🍅 ' + escapeHtml(rtText) + '</div>' : '') +
+              (legacyTmdb ? '<div class="rating-badge">TMDB ' + escapeHtml(legacyTmdb) + '</div>' : '') +
               (imdbId ? '<a class="rating-badge" href="https://www.imdb.com/title/' + imdbId + '" target="_blank" rel="noopener noreferrer">IMDb ↗</a>' : '') +
               '</div>';
 
@@ -1849,18 +1932,32 @@ let currentDetailItem = null;
       }).apiRemoveMedia({ sheetName: sheetName, tmdbId: tmdbId, title: title });
     }
 
-    function toggleMovieWatchedDirect(typeStr, rowIndex, isWatched) {
+    function toggleMovieWatchedDirect(typeStr, rowIndex, isWatched, btn) {
       if (!rowIndex) return;
-      const newWatched = !isWatched;
-      showToast('Updating status...');
-      GAS.run.withSuccessHandler(res => {
-        showToast(res.message);
-        GAS.run.withSuccessHandler(data => {
-          rawData = data;
-          renderCurrentCategoryView();
-          closeMediaDetail();
-        }).getWebAppData();
-      }).apiMarkWatched({ sheetName: 'Movies', rowIndices: [rowIndex], isWatched: newWatched });
+      var newWatched = !isWatched;
+
+      // same animation as the tick on a list item: pulse, then settle on green (or back to grey)
+      if (btn) {
+        btn.classList.add('animating-tick');
+        btn.innerHTML = newWatched ? greenCheckSvg : greyCircleCheckSvg;
+        btn.setAttribute('data-c', newWatched ? 'true' : 'false');
+        setTimeout(function() { btn.classList.remove('animating-tick'); }, 160);
+      }
+
+      GAS.run
+        .withSuccessHandler(function(res) {
+          showToast((res && res.message) || 'Updated');
+          renderCurrentCategoryView();            // the list behind the card reflects the change
+          if (!res || !res.queued) refreshDataQuietly();
+        })
+        .withFailureHandler(function() {
+          if (btn) {
+            btn.innerHTML = isWatched ? greenCheckSvg : greyCircleCheckSvg;
+            btn.setAttribute('data-c', isWatched ? 'true' : 'false');
+          }
+          showToast('Could not update status');
+        })
+        .apiMarkWatched({ sheetName: 'Movies', rowIndices: [rowIndex], isWatched: newWatched, dateWatched: newWatched ? new Date().toLocaleDateString('en-GB') : '' });
     }
 
     function promptBulkWatch() {
@@ -1913,6 +2010,397 @@ let currentDetailItem = null;
 
 
     /* ================================================================
+       Offline support
+       - watch-status changes made while offline (or when the network drops) are queued on the device
+         and applied to the spreadsheet, in order, as soon as the connection is back
+       - the last loaded library is kept on the device so the app can still open offline
+       ================================================================ */
+    var QUEUE_KEY = 'mt_pending_v1';
+    var SNAPSHOT_KEY = 'mt_snapshot_v1';
+    var QUEUEABLE = { apiMarkWatched: true, apiEditWatchDate: true };
+    var memQueue = [];
+    var flushing = false;
+    var flushTimer = null;
+
+    function isNetworkError(err) {
+      if (!err || err.unauthorized || err.config) return false;
+      var msg = String(err.message || err);
+      return err.name === 'TypeError' || /load failed|failed to fetch|network/i.test(msg);
+    }
+
+    function readQueue() {
+      try { var q = JSON.parse(localStorage.getItem(QUEUE_KEY) || 'null'); if (Array.isArray(q)) return q; } catch (e) {}
+      return memQueue;
+    }
+    function writeQueue(q) {
+      memQueue = q;
+      try { localStorage.setItem(QUEUE_KEY, JSON.stringify(q)); } catch (e) {}
+      updateSyncBanner();
+    }
+
+    function updateSyncBanner() {
+      var b = document.getElementById('syncBanner');
+      if (!b) return;
+      var n = readQueue().length;
+      var online = navigator.onLine;
+      if (!online) {
+        b.textContent = n ? 'Offline \u2013 ' + n + ' change' + (n === 1 ? '' : 's') + ' will sync when you are back online' : 'Offline \u2013 showing saved data';
+        b.className = 'show';
+      } else if (n) {
+        b.textContent = 'Syncing ' + n + ' change' + (n === 1 ? '' : 's') + '\u2026';
+        b.className = 'show syncing';
+      } else {
+        b.className = '';
+      }
+    }
+
+    function localListFor(data, sheetName) {
+      return /movie/i.test(String(sheetName)) ? data.movies : data.tvShows;
+    }
+
+    /* The row an update refers to: same key (tmdbId + label) if possible, otherwise the same row number */
+    function findLocalItem(data, sheetName, row, key) {
+      var list = localListFor(data, sheetName) || [];
+      var i, it;
+      if (key && key.label) {
+        var want = String(key.label).trim().toLowerCase();
+        for (i = 0; i < list.length; i++) {
+          it = list[i];
+          if (String(it.title || '').trim().toLowerCase() === want && (!key.tmdbId || String(it.tmdbId || '') === String(key.tmdbId))) return i;
+        }
+      }
+      for (i = 0; i < list.length; i++) if (list[i].rowIndex === row) return i;
+      return -1;
+    }
+
+    function rowKind(title) {
+      var t = String(title || '').trim();
+      if (/^Season\s+\d+/i.test(t)) return 'season';
+      if (/^S\d+E\d+/i.test(t)) return 'episode';
+      return t ? 'show' : 'blank';
+    }
+
+    function applyChangeTo(data, action, params) {
+      (params.rowIndices || []).forEach(function(row, n) {
+        var key = params.keys ? params.keys[n] : null;
+        var list = localListFor(data, params.sheetName) || [];
+        var idx = findLocalItem(data, params.sheetName, row, key);
+        if (idx < 0) return;
+
+        var watched = (action === 'apiEditWatchDate') ? true : params.isWatched === true;
+        var date = (action === 'apiEditWatchDate') ? (params.newDate || '') : (watched ? (params.dateWatched || '') : '');
+        var item = list[idx];
+        item.status = watched ? 'TRUE' : 'FALSE';
+        item.dateWatched = date;
+
+        // ticking a show / season header ticks everything beneath it (as the spreadsheet does)
+        if (!/movie/i.test(String(params.sheetName)) && action === 'apiMarkWatched') {
+          var kind = rowKind(item.title);
+          if (kind === 'show' || kind === 'season') {
+            for (var j = idx + 1; j < list.length; j++) {
+              var k2 = rowKind(list[j].title);
+              if (k2 === 'show' || (kind === 'season' && k2 === 'season')) break;
+              list[j].status = watched ? 'TRUE' : 'FALSE';
+            }
+          }
+        }
+      });
+    }
+
+    function applyPendingToData(data) {
+      readQueue().forEach(function(e) { applyChangeTo(data, e.action, e.params); });
+    }
+
+    function buildKeys(params) {
+      var list = localListFor(rawData, params.sheetName) || [];
+      return (params.rowIndices || []).map(function(row) {
+        var it = null;
+        for (var i = 0; i < list.length; i++) if (list[i].rowIndex === row) { it = list[i]; break; }
+        return it ? { tmdbId: String(it.tmdbId || ''), label: String(it.title || '') } : null;
+      });
+    }
+
+    function queueableCall(name, args, onOk, onFail) {
+      var params = JSON.parse(JSON.stringify(args[0] || {}));
+      params.keys = buildKeys(params);
+      applyChangeTo(rawData, name, params);        // screens show the change straight away
+
+      var entry = { id: Date.now() + '-' + Math.random().toString(36).slice(2, 8), action: name, params: params };
+      var q = readQueue();
+
+      function queueIt(msg) {
+        q = readQueue(); q.push(entry); writeQueue(q);
+        setTimeout(function() { onOk({ success: true, queued: true, message: msg }); }, 0);
+      }
+
+      if (!navigator.onLine) { queueIt('Saved offline \u2013 will sync when you are back online'); return; }
+      if (q.length) { queueIt('Saving\u2026'); flushQueueSoon(); return; }   // keep updates in order
+
+      gasCall(name, [params]).then(
+        function(res) {
+          if (res && res.success === false) refreshDataQuietly();   // server refused: show the real state again
+          onOk(res);
+        },
+        function(err) {
+          if (err && err.unauthorized) { clearAccessCode(); showLogin('Sign in again to continue.'); onFail(err); return; }
+          if (isNetworkError(err)) { queueIt('Saved offline \u2013 will sync when you are back online'); return; }
+          refreshDataQuietly();
+          onFail(err);
+        }
+      );
+    }
+
+    function flushQueueSoon() {
+      clearTimeout(flushTimer);
+      flushTimer = setTimeout(flushQueue, 300);
+    }
+
+    function flushQueue() {
+      if (flushing || !navigator.onLine || !getAccessCode()) { updateSyncBanner(); return; }
+      if (!readQueue().length) { updateSyncBanner(); return; }
+      flushing = true;
+      var skipped = 0;
+      updateSyncBanner();
+
+      (function next() {
+        var q = readQueue();
+        if (!q.length) {
+          flushing = false;
+          updateSyncBanner();
+          showToast(skipped ? 'Synced \u2013 ' + skipped + ' change' + (skipped === 1 ? '' : 's') + ' could not be applied (the item may have been removed)' : 'Offline changes synced');
+          refreshDataQuietly();
+          return;
+        }
+        var e = q[0];
+        gasCall(e.action, [e.params]).then(
+          function(res) {
+            if (res && res.success === false) skipped++;
+            var cur = readQueue(); cur.shift(); writeQueue(cur);
+            next();
+          },
+          function(err) {
+            if (err && err.unauthorized) { flushing = false; clearAccessCode(); showLogin('Sign in again to sync your changes.'); return; }
+            if (isNetworkError(err)) { flushing = false; updateSyncBanner(); return; }   // try again when back online
+            var cur = readQueue(); cur.shift(); writeQueue(cur);                          // server rejected it: drop it
+            skipped++;
+            next();
+          }
+        );
+      })();
+    }
+
+    function saveSnapshot() {
+      try {
+        localStorage.setItem(SNAPSHOT_KEY, JSON.stringify({
+          movies: rawData.movies, tvShows: rawData.tvShows,
+          movieRecommendations: rawData.movieRecommendations, tvRecommendations: rawData.tvRecommendations,
+          settings: appSettings
+        }));
+      } catch (e) { /* too big for this browser's storage: offline start-up just won't be available */ }
+    }
+
+    function loadSnapshot() {
+      try {
+        var s = JSON.parse(localStorage.getItem(SNAPSHOT_KEY) || 'null');
+        if (!s || !Array.isArray(s.movies) || !Array.isArray(s.tvShows)) return false;
+        rawData = {
+          movies: s.movies, tvShows: s.tvShows,
+          movieRecommendations: s.movieRecommendations || [], tvRecommendations: s.tvRecommendations || []
+        };
+        applyPendingToData(rawData);
+        if (s.settings && s.settings.resumeWeeks) appSettings.resumeWeeks = s.settings.resumeWeeks;
+        return true;
+      } catch (e) { return false; }
+    }
+
+    function clearSnapshot() {
+      try { localStorage.removeItem(SNAPSHOT_KEY); } catch (e) {}
+    }
+
+    window.addEventListener('online', function() { updateSyncBanner(); flushQueueSoon(); });
+    window.addEventListener('offline', updateSyncBanner);
+    document.addEventListener('visibilitychange', function() { if (!document.hidden) flushQueueSoon(); });
+    setInterval(function() { if (readQueue().length) flushQueueSoon(); }, 30000);
+
+    /* ================================================================
+       Calendar: TV episodes by air date and movies by release date
+       ================================================================ */
+    var calState = { view: 'week', anchor: new Date(), showTv: true, showMovies: true, showWatched: true, showUnwatched: true, selected: '' };
+    var CAL_DOW = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+    var CAL_MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+
+    function calDay0(d) { return new Date(d.getFullYear(), d.getMonth(), d.getDate()); }
+    function calAddDays(d, n) { return new Date(d.getFullYear(), d.getMonth(), d.getDate() + n); }
+    function calMonday(d) { var x = calDay0(d); return calAddDays(x, -((x.getDay() + 6) % 7)); }
+    function calKey(d) { return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); }
+    function calFromKey(k) { var m = String(k).match(/^(\d{4})-(\d{2})-(\d{2})$/); return m ? new Date(+m[1], +m[2] - 1, +m[3]) : null; }
+    function calParse(s) {
+      var m = String(s || '').match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+      return m ? new Date(+m[3], +m[2] - 1, +m[1]) : null;
+    }
+    function calIsTrue(v) { return v === true || v === 'TRUE'; }
+
+    function buildCalendarIndex(search) {
+      var byDay = {};
+      function add(e) {
+        if (!e.date) return;
+        if (e.watched ? !calState.showWatched : !calState.showUnwatched) return;
+        if (search && e.hay.indexOf(search) === -1) return;
+        var k = calKey(e.date);
+        (byDay[k] = byDay[k] || []).push(e);
+      }
+      if (calState.showMovies) {
+        rawData.movies.forEach(function(m) {
+          add({ kind: 'movie', date: calParse(m.date), label: m.title, watched: calIsTrue(m.status), item: m, show: m,
+                hay: ((m.title || '') + ' ' + (m.genre || '')).toLowerCase() });
+        });
+      }
+      if (calState.showTv) {
+        parseTVShowBlocks(rawData.tvShows).forEach(function(b) {
+          b.episodes.forEach(function(ep) {
+            add({ kind: 'tv', date: calParse(ep.item.date), label: b.show.title + ' ' + String(ep.item.title || '').trim(),
+                  watched: !!ep.isWatched, item: ep.item, show: b.show,
+                  hay: ((b.show.title || '') + ' ' + (b.show.genre || '')).toLowerCase() });
+          });
+        });
+      }
+      Object.keys(byDay).forEach(function(k) {
+        byDay[k].sort(function(a, b) { return a.kind === b.kind ? a.label.localeCompare(b.label) : (a.kind === 'tv' ? -1 : 1); });
+      });
+      return byDay;
+    }
+
+    function calChipHtml(e) {
+      var tick = '<button class="cal-tick" data-act="calTick" data-a="' + escapeHtml(e.item.sheetName) + '" data-b="' + (parseInt(e.item.rowIndex, 10) || 0) +
+        '" data-c="' + (e.watched ? 'true' : 'false') + '" aria-label="' + (e.watched ? 'Mark as unwatched' : 'Mark as watched') + '">' +
+        (e.watched ? greenCheckSvg : greyCircleCheckSvg) + '</button>';
+      return '<div class="cal-item ' + (e.kind === 'tv' ? 'cal-tv' : 'cal-movie') + (e.watched ? ' cal-watched' : '') +
+        '" data-act="calOpen" data-a="' + e.kind + '" data-b="' + escapeHtml(String(e.show.tmdbId || '')) + '" data-c="' + escapeHtml(e.show.title) + '">' +
+        '<span class="cal-title">' + escapeHtml(e.label) + '</span>' + tick + '</div>';
+    }
+
+    function calTitle() {
+      var a = calState.anchor;
+      if (calState.view === 'year') return String(a.getFullYear());
+      if (calState.view === 'month') return CAL_MONTHS[a.getMonth()] + ' ' + a.getFullYear();
+      var s = calMonday(a), e = calAddDays(s, 6);
+      var sm = CAL_MONTHS[s.getMonth()].substring(0, 3), em = CAL_MONTHS[e.getMonth()].substring(0, 3);
+      return s.getDate() + (sm !== em ? ' ' + sm : '') + ' – ' + e.getDate() + ' ' + em + ' ' + e.getFullYear();
+    }
+
+    function calWeekHtml(byDay) {
+      var start = calMonday(calState.anchor);
+      var todayKey = calKey(new Date());
+      var html = '<div class="cal-week">';
+      for (var i = 0; i < 7; i++) {
+        var d = calAddDays(start, i), k = calKey(d), items = byDay[k] || [];
+        html += '<div class="cal-day' + (k === todayKey ? ' cal-today' : '') + '">' +
+          '<div class="cal-day-head"><span class="cal-dow">' + CAL_DOW[i] + '</span><span class="cal-dom">' + d.getDate() + '</span></div>' +
+          '<div class="cal-day-items">' + (items.length ? items.map(calChipHtml).join('') : '<div class="cal-empty">–</div>') + '</div></div>';
+      }
+      return html + '</div>';
+    }
+
+    function calMonthHtml(byDay) {
+      var a = calState.anchor;
+      var first = new Date(a.getFullYear(), a.getMonth(), 1);
+      var last = new Date(a.getFullYear(), a.getMonth() + 1, 0);
+      var gridStart = calMonday(first);
+      var weeks = Math.ceil(((first.getDay() + 6) % 7 + last.getDate()) / 7);
+      var todayKey = calKey(new Date());
+      var html = '<div class="cal-month-head">' + CAL_DOW.map(function(n) { return '<div>' + n + '</div>'; }).join('') + '</div><div class="cal-month-grid">';
+      for (var i = 0; i < weeks * 7; i++) {
+        var d = calAddDays(gridStart, i), k = calKey(d), items = byDay[k] || [];
+        html += '<div class="cal-cell' + (d.getMonth() !== a.getMonth() ? ' cal-other' : '') + (k === todayKey ? ' cal-today' : '') + (k === calState.selected ? ' cal-selected' : '') +
+          '" data-act="calDay" data-a="' + k + '"><div class="cal-cell-num">' + d.getDate() + '</div>' +
+          items.slice(0, 3).map(calChipHtml).join('') + (items.length > 3 ? '<div class="cal-more">+' + (items.length - 3) + ' more</div>' : '') + '</div>';
+      }
+      html += '</div>';
+      if (calState.selected) {
+        var sd = calFromKey(calState.selected), si = byDay[calState.selected] || [];
+        if (sd) {
+          html += '<div class="cal-selected-day"><div class="section-title">' + CAL_DOW[(sd.getDay() + 6) % 7] + ' ' + sd.getDate() + ' ' + CAL_MONTHS[sd.getMonth()] + '</div>' +
+            (si.length ? si.map(calChipHtml).join('') : '<div class="cal-empty">Nothing on this day</div>') + '</div>';
+        }
+      }
+      return html;
+    }
+
+    function calYearHtml(byDay) {
+      var y = calState.anchor.getFullYear();
+      var todayKey = calKey(new Date());
+      var html = '<div class="cal-year">';
+      for (var m = 0; m < 12; m++) {
+        var first = new Date(y, m, 1), days = new Date(y, m + 1, 0).getDate(), lead = (first.getDay() + 6) % 7;
+        html += '<div class="cal-mini"><div class="cal-mini-title" data-act="calMonth" data-a="' + y + '-' + String(m + 1).padStart(2, '0') + '">' + CAL_MONTHS[m] + '</div><div class="cal-mini-grid">';
+        ['M', 'T', 'W', 'T', 'F', 'S', 'S'].forEach(function(c) { html += '<div class="cal-mini-dow">' + c + '</div>'; });
+        for (var b = 0; b < lead; b++) html += '<div class="cal-mini-day cal-blank"></div>';
+        for (var d = 1; d <= days; d++) {
+          var k = y + '-' + String(m + 1).padStart(2, '0') + '-' + String(d).padStart(2, '0'), items = byDay[k] || [];
+          var tvs = items.filter(function(e) { return e.kind === 'tv'; }), mv = items.filter(function(e) { return e.kind === 'movie'; });
+          var dots = (tvs.length ? '<span class="cal-dot tv' + (tvs.every(function(e) { return e.watched; }) ? ' done' : '') + '"></span>' : '') +
+                     (mv.length ? '<span class="cal-dot movie' + (mv.every(function(e) { return e.watched; }) ? ' done' : '') + '"></span>' : '');
+          html += '<div class="cal-mini-day' + (k === todayKey ? ' cal-today' : '') + '" data-act="calDay" data-a="' + k + '">' + d + '<div class="cal-dots">' + dots + '</div></div>';
+        }
+        html += '</div></div>';
+      }
+      return html + '</div>';
+    }
+
+    function renderCalendarView(container, search) {
+      container.className = 'calendar-view';
+      var byDay = buildCalendarIndex(search);
+      var body = calState.view === 'week' ? calWeekHtml(byDay) : (calState.view === 'month' ? calMonthHtml(byDay) : calYearHtml(byDay));
+      container.innerHTML =
+        '<div class="cal-toolbar">' +
+        '<button class="cal-nav-btn" data-act="calNav" data-a="-1" aria-label="Previous">‹</button>' +
+        '<div class="cal-title-main">' + escapeHtml(calTitle()) + '</div>' +
+        '<button class="cal-nav-btn" data-act="calNav" data-a="1" aria-label="Next">›</button>' +
+        '<button class="cal-today-btn" data-act="calToday">Today</button></div>' + body;
+
+      var sx = 0, sy = 0;
+      container.ontouchstart = function(e) { sx = e.touches[0].clientX; sy = e.touches[0].clientY; };
+      container.ontouchend = function(e) {
+        var t = e.changedTouches[0], dx = t.clientX - sx, dy = t.clientY - sy;
+        if (Math.abs(dx) > 70 && Math.abs(dy) < 45) calNavigate(dx < 0 ? 1 : -1);   // swipe to move
+      };
+    }
+
+    function calNavigate(dir) {
+      var a = calState.anchor;
+      if (calState.view === 'week') calState.anchor = calAddDays(a, 7 * dir);
+      else if (calState.view === 'month') calState.anchor = new Date(a.getFullYear(), a.getMonth() + dir, 1);
+      else calState.anchor = new Date(a.getFullYear() + dir, 0, 1);
+      calState.selected = '';
+      renderCurrentCategoryView();
+    }
+
+    function calendarPopoverHtml() {
+      function row(act, a, label, sel) {
+        return '<div class="popover-item ' + (sel ? 'selected' : '') + '" data-act="' + act + '" data-a="' + a + '"><span>' + label + '</span><div class="check-box-icon">✓</div></div>';
+      }
+      return '<div class="popover-section-label">View</div><div class="popover-menu-list">' +
+        row('calView', 'week', 'Week', calState.view === 'week') + row('calView', 'month', 'Month', calState.view === 'month') + row('calView', 'year', 'Year', calState.view === 'year') +
+        '</div><div class="popover-divider"></div><div class="popover-section-label">Show</div><div class="popover-menu-list">' +
+        row('calToggle', 'showTv', 'TV shows', calState.showTv) + row('calToggle', 'showMovies', 'Movies', calState.showMovies) +
+        '</div><div class="popover-divider"></div><div class="popover-section-label">Status</div><div class="popover-menu-list">' +
+        row('calToggle', 'showWatched', 'Watched', calState.showWatched) + row('calToggle', 'showUnwatched', 'Unwatched', calState.showUnwatched) + '</div>';
+    }
+
+    function calTick(el) {
+      var row = parseInt(el.dataset.b, 10), sheet = el.dataset.a, was = el.dataset.c === 'true', now = !was;
+      if (!row) return;
+      el.classList.add('animating-tick');
+      el.innerHTML = now ? greenCheckSvg : greyCircleCheckSvg;
+      GAS.run
+        .withSuccessHandler(function(res) { if (res && res.success === false) showToast(res.message || 'Could not update'); })
+        .withFailureHandler(function() { showToast('Could not update'); })
+        .apiMarkWatched({ sheetName: sheet, rowIndices: [row], isWatched: now, dateWatched: now ? new Date().toLocaleDateString('en-GB') : '' });
+      // the change is applied to the local data straight away; redraw once the pulse has played
+      setTimeout(renderCurrentCategoryView, 220);
+    }
+
+    /* ================================================================
        Delegated click handling.
        Nothing in the markup contains inline JavaScript any more: elements
        carry data-act (+ data-a / data-b / data-c values, always HTML-escaped
@@ -1963,8 +2451,31 @@ let currentDetailItem = null;
       handleRemoveFromList: function(el) { handleRemoveFromList(el.dataset.a, el.dataset.b, el.dataset.c); },
       handleAddToList: function(el) { handleAddToList(el.dataset.a, el.dataset.b); },
       toggleMovieWatchedDirect: function(el) {
-        toggleMovieWatchedDirect(el.dataset.a, parseInt(el.dataset.b, 10), el.dataset.c === 'true');
+        toggleMovieWatchedDirect(el.dataset.a, parseInt(el.dataset.b, 10), el.dataset.c === 'true', el);
       },
+      recAction: function(el) { recAction(el.dataset.a, el.dataset.b, el.dataset.c, el); },
+
+      calView: function(el) { calState.view = el.dataset.a; calState.selected = ''; renderPopoverContent(); renderCurrentCategoryView(); },
+      calToggle: function(el) { calState[el.dataset.a] = !calState[el.dataset.a]; renderPopoverContent(); renderCurrentCategoryView(); },
+      calNav: function(el) { calNavigate(parseInt(el.dataset.a, 10)); },
+      calToday: function() { calState.anchor = new Date(); calState.selected = ''; renderCurrentCategoryView(); },
+      calDay: function(el) {
+        var d = calFromKey(el.dataset.a);
+        if (!d) return;
+        if (calState.view === 'year') { calState.view = 'month'; calState.anchor = d; }
+        calState.selected = (calState.selected === el.dataset.a && calState.view === 'month') ? '' : el.dataset.a;
+        renderCurrentCategoryView();
+      },
+      calMonth: function(el) {
+        var m = String(el.dataset.a).match(/^(\d{4})-(\d{2})$/);
+        if (!m) return;
+        calState.anchor = new Date(+m[1], +m[2] - 1, 1); calState.view = 'month'; calState.selected = '';
+        renderCurrentCategoryView();
+      },
+      calOpen: function(el) {
+        openMediaDetail({ title: el.dataset.c, tmdbId: el.dataset.b, type: el.dataset.a, date: '', synopsis: '' });
+      },
+      calTick: function(el) { calTick(el); },
       toggleSeasonAccordion: function(el) { toggleSeasonAccordion(el, el.dataset.a, parseInt(el.dataset.b, 10)); },
       toggleEpisodeTick: function(el, ev) { toggleEpisodeTick(eventFor(el, ev), el); }
     };
@@ -1991,6 +2502,14 @@ let currentDetailItem = null;
         memoryAccessCode = h;
         try { history.replaceState(null, '', location.pathname + location.search); } catch (e) {}
       }
-      if (getAccessCode()) startLoad();
-      else showLogin('');
+      if (getAccessCode()) {
+        if (!navigator.onLine && loadSnapshot()) showLibrary();   // offline start-up: use the last saved data
+        else startLoad();
+      } else {
+        showLogin('');
+      }
+      updateSyncBanner();
+      if ('serviceWorker' in navigator) {
+        navigator.serviceWorker.register('sw.js').catch(function() {});
+      }
     })();
