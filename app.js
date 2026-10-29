@@ -155,6 +155,12 @@
     var lastViewportWidth = window.innerWidth;
     window.addEventListener('resize', function() {
       positionNavPill(false);
+      if (currentCategory === 'calendar') {   // width AND height changes re-fit the calendar
+        lastViewportWidth = window.innerWidth;
+        clearTimeout(calResizeTimer);
+        calResizeTimer = setTimeout(renderCurrentCategoryView, 80);
+        return;
+      }
       if (window.innerWidth === lastViewportWidth) return;
       lastViewportWidth = window.innerWidth;
       renderCurrentCategoryView();
@@ -1563,6 +1569,12 @@ function renderTvSectionGroup(container, sectionTitle, items, viewMode, isHistor
       return (d === 'TBC') ? 'TBC' : '';
     }
 
+    /* TMDB gives yyyy-mm-dd; the episode list shows dd/mm/yy */
+    function isoToDMYShort(s) {
+      var m = String(s || '').match(/^(\d{4})-(\d{2})-(\d{2})/);
+      return m ? (m[3] + '/' + m[2] + '/' + m[1].slice(2)) : (s || '');
+    }
+
     function isoToDMY(s) {
       var m = String(s || '').match(/^(\d{4})-(\d{2})-(\d{2})/);
       return m ? (m[3] + '/' + m[2] + '/' + m[1]) : (s || '');
@@ -1844,7 +1856,7 @@ let currentDetailItem = null;
             epHtml += '<div class="episode-row" style="gap:0.75rem;">' +
               '<div style="flex:1; min-width:0;">' +
               '<div style="font-weight:600; font-size:0.9rem; color:#fff;">' + escapeHtml(ep.name) + '</div>' +
-              '<div style="font-size:0.78rem; color:var(--text-sub);">' + epTagNum + ' \u00b7 ' + escapeHtml(ep.air_date || 'TBC') + '</div>' +
+              '<div style="font-size:0.78rem; color:var(--text-sub);">' + epTagNum + ' \u00b7 ' + escapeHtml(isoToDMYShort(ep.air_date) || 'TBC') + '</div>' +
               '</div>' +
               tickHtml +
               '</div>';
@@ -2224,10 +2236,18 @@ let currentDetailItem = null;
 
     /* ================================================================
        Calendar: TV episodes by air date and movies by release date
+       Month / week grids fill the window and re-fit whenever it is resized.
        ================================================================ */
     var calState = { view: 'week', anchor: new Date(), showTv: true, showMovies: true, showWatched: true, showUnwatched: true, selected: '' };
     var CAL_DOW = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
     var CAL_MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+    var calCellItems = {};      // 'yyyy-mm-dd' -> entries (used when fitting boxes into their date box)
+    var calResizeTimer = null;
+
+    function isDesktopBrowser() {
+      try { if (window.matchMedia) return window.matchMedia('(hover: hover) and (pointer: fine)').matches; } catch (e) {}
+      return window.innerWidth > 768;
+    }
 
     function calDay0(d) { return new Date(d.getFullYear(), d.getMonth(), d.getDate()); }
     function calAddDays(d, n) { return new Date(d.getFullYear(), d.getMonth(), d.getDate() + n); }
@@ -2270,13 +2290,35 @@ let currentDetailItem = null;
       return byDay;
     }
 
-    function calChipHtml(e) {
-      var tick = '<button class="cal-tick" data-act="calTick" data-a="' + escapeHtml(e.item.sheetName) + '" data-b="' + (parseInt(e.item.rowIndex, 10) || 0) +
-        '" data-c="' + (e.watched ? 'true' : 'false') + '" aria-label="' + (e.watched ? 'Mark as unwatched' : 'Mark as watched') + '">' +
-        (e.watched ? greenCheckSvg : greyCircleCheckSvg) + '</button>';
-      return '<div class="cal-item ' + (e.kind === 'tv' ? 'cal-tv' : 'cal-movie') + (e.watched ? ' cal-watched' : '') +
-        '" data-act="calOpen" data-a="' + e.kind + '" data-b="' + escapeHtml(String(e.show.tmdbId || '')) + '" data-c="' + escapeHtml(e.show.title) + '">' +
-        '<span class="cal-title">' + escapeHtml(e.label) + '</span>' + tick + '</div>';
+    /* A "group" is one box: a single item, or several episodes of one show on the same day (shown as xN). */
+    function calGroupItems(entries) {
+      var out = [], idx = {};
+      entries.forEach(function(e) {
+        if (e.kind !== 'tv') { out.push({ entries: [e] }); return; }
+        var k = String(e.show.tmdbId || e.show.title);
+        if (idx[k] === undefined) { idx[k] = out.length; out.push({ entries: [e] }); } else out[idx[k]].entries.push(e);
+      });
+      return out;
+    }
+    function calEntriesCount(groups) {
+      return groups.reduce(function(n, g) { return n + g.entries.length; }, 0);
+    }
+
+    function calChipHtml(group) {
+      var es = group.entries, first = es[0], n = es.length;
+      var allWatched = es.every(function(e) { return e.watched; });
+      var rows = es.map(function(e) { return parseInt(e.item.rowIndex, 10) || 0; }).filter(Boolean).join(',');
+      var tick = '<button class="cal-tick" data-act="calTick" data-a="' + escapeHtml(first.item.sheetName) + '" data-b="' + rows +
+        '" data-c="' + (allWatched ? 'true' : 'false') + '" aria-label="' + (allWatched ? 'Mark as unwatched' : 'Mark as watched') + '">' +
+        (allWatched ? greenCheckSvg : greyCircleCheckSvg) + '</button>';
+      var badge = n > 1 ? '<span class="cal-xn">x' + n + '</span>' : '';
+      return '<div class="cal-item ' + (first.kind === 'tv' ? 'cal-tv' : 'cal-movie') + (allWatched ? ' cal-watched' : '') +
+        '" data-act="calOpen" data-a="' + first.kind + '" data-b="' + escapeHtml(String(first.show.tmdbId || '')) + '" data-c="' + escapeHtml(first.show.title) + '">' +
+        '<span class="cal-title">' + escapeHtml(first.label) + '</span>' + badge + tick + '</div>';
+    }
+
+    function calChipsHtml(entries) {
+      return entries.map(function(e) { return calChipHtml({ entries: [e] }); }).join('');
     }
 
     function calTitle() {
@@ -2288,15 +2330,28 @@ let currentDetailItem = null;
       return s.getDate() + (sm !== em ? ' ' + sm : '') + ' – ' + e.getDate() + ' ' + em + ' ' + e.getFullYear();
     }
 
+    /* Date control: previous at the far left, next (and Today) at the far right, title centred above the grid. */
+    function calHeaderHtml() {
+      var clickable = calState.view !== 'year';
+      return '<div class="cal-header">' +
+        '<div class="cal-header-left"><button class="cal-nav-btn" data-act="calNav" data-a="-1" aria-label="Previous">‹</button></div>' +
+        '<div class="cal-title-wrap' + (clickable ? '' : ' cal-static') + '"' + (clickable ? ' data-act="calTitle"' : '') + '>' +
+          '<div class="cal-title-main">' + escapeHtml(calTitle()) + '</div>' +
+          '<div class="cal-chevron">' + (clickable ? '⌃' : '') + '</div></div>' +
+        '<div class="cal-header-right"><button class="cal-today-btn" data-act="calToday">Today</button>' +
+          '<button class="cal-nav-btn" data-act="calNav" data-a="1" aria-label="Next">›</button></div>' +
+        '</div>';
+    }
+
     function calWeekHtml(byDay) {
       var start = calMonday(calState.anchor);
       var todayKey = calKey(new Date());
       var html = '<div class="cal-week">';
       for (var i = 0; i < 7; i++) {
         var d = calAddDays(start, i), k = calKey(d), items = byDay[k] || [];
-        html += '<div class="cal-day' + (k === todayKey ? ' cal-today' : '') + '">' +
+        html += '<div class="cal-day cal-fit' + (k === todayKey ? ' cal-today' : '') + '" data-k="' + k + '">' +
           '<div class="cal-day-head"><span class="cal-dow">' + CAL_DOW[i] + '</span><span class="cal-dom">' + d.getDate() + '</span></div>' +
-          '<div class="cal-day-items">' + (items.length ? items.map(calChipHtml).join('') : '<div class="cal-empty">–</div>') + '</div></div>';
+          '<div class="cal-cell-items">' + (items.length ? calChipsHtml(items) : '<div class="cal-empty">–</div>') + '</div></div>';
       }
       return html + '</div>';
     }
@@ -2311,16 +2366,16 @@ let currentDetailItem = null;
       var html = '<div class="cal-month-head">' + CAL_DOW.map(function(n) { return '<div>' + n + '</div>'; }).join('') + '</div><div class="cal-month-grid">';
       for (var i = 0; i < weeks * 7; i++) {
         var d = calAddDays(gridStart, i), k = calKey(d), items = byDay[k] || [];
-        html += '<div class="cal-cell' + (d.getMonth() !== a.getMonth() ? ' cal-other' : '') + (k === todayKey ? ' cal-today' : '') + (k === calState.selected ? ' cal-selected' : '') +
-          '" data-act="calDay" data-a="' + k + '"><div class="cal-cell-num">' + d.getDate() + '</div>' +
-          items.slice(0, 3).map(calChipHtml).join('') + (items.length > 3 ? '<div class="cal-more">+' + (items.length - 3) + ' more</div>' : '') + '</div>';
+        html += '<div class="cal-cell cal-fit' + (d.getMonth() !== a.getMonth() ? ' cal-other' : '') + (k === todayKey ? ' cal-today' : '') + (k === calState.selected ? ' cal-selected' : '') +
+          '" data-act="calDay" data-a="' + k + '" data-k="' + k + '"><div class="cal-cell-items">' + calChipsHtml(items) + '</div>' +
+          '<div class="cal-cell-num">' + d.getDate() + '</div></div>';
       }
       html += '</div>';
-      if (calState.selected) {
+      if (calState.selected && !isDesktopBrowser()) {   // on a phone the cells are tiny: the chosen day is listed below
         var sd = calFromKey(calState.selected), si = byDay[calState.selected] || [];
         if (sd) {
           html += '<div class="cal-selected-day"><div class="section-title">' + CAL_DOW[(sd.getDay() + 6) % 7] + ' ' + sd.getDate() + ' ' + CAL_MONTHS[sd.getMonth()] + '</div>' +
-            (si.length ? si.map(calChipHtml).join('') : '<div class="cal-empty">Nothing on this day</div>') + '</div>';
+            (si.length ? calChipsHtml(si) : '<div class="cal-empty">Nothing on this day</div>') + '</div>';
         }
       }
       return html;
@@ -2328,11 +2383,13 @@ let currentDetailItem = null;
 
     function calYearHtml(byDay) {
       var y = calState.anchor.getFullYear();
-      var todayKey = calKey(new Date());
+      var now = new Date();
+      var todayKey = calKey(now);
       var html = '<div class="cal-year">';
       for (var m = 0; m < 12; m++) {
         var first = new Date(y, m, 1), days = new Date(y, m + 1, 0).getDate(), lead = (first.getDay() + 6) % 7;
-        html += '<div class="cal-mini"><div class="cal-mini-title" data-act="calMonth" data-a="' + y + '-' + String(m + 1).padStart(2, '0') + '">' + CAL_MONTHS[m] + '</div><div class="cal-mini-grid">';
+        var isCurrentMonth = (y === now.getFullYear() && m === now.getMonth());
+        html += '<div class="cal-mini"><div class="cal-mini-title' + (isCurrentMonth ? ' cal-current-month' : '') + '" data-act="calMonth" data-a="' + y + '-' + String(m + 1).padStart(2, '0') + '">' + CAL_MONTHS[m] + '</div><div class="cal-mini-grid">';
         ['M', 'T', 'W', 'T', 'F', 'S', 'S'].forEach(function(c) { html += '<div class="cal-mini-dow">' + c + '</div>'; });
         for (var b = 0; b < lead; b++) html += '<div class="cal-mini-day cal-blank"></div>';
         for (var d = 1; d <= days; d++) {
@@ -2347,16 +2404,68 @@ let currentDetailItem = null;
       return html + '</div>';
     }
 
+    /* Month / week grids use the window height (desktop); phone cells have a fixed size. */
+    function calSizeGrid(container) {
+      var gridEl = container.querySelector('.cal-month-grid') || container.querySelector('.cal-week');
+      if (!gridEl) return;
+      var isMonth = gridEl.classList.contains('cal-month-grid');
+      var rowH = 0;
+      if (!isDesktopBrowser()) {
+        rowH = isMonth ? 92 : 0;
+      } else {
+        var rows = isMonth ? Math.max(1, Math.round(gridEl.children.length / 7)) : 1;
+        var top = gridEl.getBoundingClientRect().top + (window.pageYOffset || 0);
+        var avail = (window.innerHeight || 800) - top - 110;   // leave room for the bottom menu
+        rowH = Math.max(isMonth ? 92 : 220, Math.floor(avail / rows));
+      }
+      if (rowH) container.style.setProperty('--cal-row-h', rowH + 'px');
+      else container.style.removeProperty('--cal-row-h');
+    }
+
+    /* Put the items into their date box: if they do not fit, episodes of one show on a day become one box
+       with an xN count; if that is still too much, the rest is summarised as "+N more". */
+    function calFitUnit(unit, entries) {
+      var box = unit.querySelector('.cal-cell-items');
+      if (!box) return;
+      var reserved = 0;
+      Array.prototype.forEach.call(unit.children, function(c) {
+        if (c === box) return;
+        var pos = '';
+        try { pos = window.getComputedStyle(c).position; } catch (e) {}
+        if (pos !== 'absolute') reserved += c.offsetHeight || 0;
+      });
+      function overflows() { return box.offsetHeight > unit.clientHeight - reserved + 1; }
+
+      box.innerHTML = calChipsHtml(entries);
+      if (!overflows()) return;
+
+      var grouped = calGroupItems(entries);
+      if (grouped.length < entries.length) {
+        box.innerHTML = grouped.map(calChipHtml).join('');
+        if (!overflows()) return;
+      }
+      for (var k = grouped.length - 1; k >= 0; k--) {
+        var shown = grouped.slice(0, k);
+        box.innerHTML = shown.map(calChipHtml).join('') + '<div class="cal-more">+' + (entries.length - calEntriesCount(shown)) + ' more</div>';
+        if (!overflows()) return;
+      }
+    }
+
+    function calFitAll(container) {
+      Array.prototype.forEach.call(container.querySelectorAll('.cal-fit'), function(unit) {
+        var items = calCellItems[unit.getAttribute('data-k')] || [];
+        if (items.length) calFitUnit(unit, items);
+      });
+    }
+
     function renderCalendarView(container, search) {
-      container.className = 'calendar-view';
+      container.className = 'calendar-view ' + (isDesktopBrowser() ? 'cal-desktop' : 'cal-touch');
       var byDay = buildCalendarIndex(search);
+      calCellItems = byDay;
       var body = calState.view === 'week' ? calWeekHtml(byDay) : (calState.view === 'month' ? calMonthHtml(byDay) : calYearHtml(byDay));
-      container.innerHTML =
-        '<div class="cal-toolbar">' +
-        '<button class="cal-nav-btn" data-act="calNav" data-a="-1" aria-label="Previous">‹</button>' +
-        '<div class="cal-title-main">' + escapeHtml(calTitle()) + '</div>' +
-        '<button class="cal-nav-btn" data-act="calNav" data-a="1" aria-label="Next">›</button>' +
-        '<button class="cal-today-btn" data-act="calToday">Today</button></div>' + body;
+      container.innerHTML = calHeaderHtml() + body;
+      calSizeGrid(container);
+      calFitAll(container);
 
       var sx = 0, sy = 0;
       container.ontouchstart = function(e) { sx = e.touches[0].clientX; sy = e.touches[0].clientY; };
@@ -2375,27 +2484,45 @@ let currentDetailItem = null;
       renderCurrentCategoryView();
     }
 
+    /* Clicking the title zooms out: week -> its month, month -> its year */
+    function calZoomOut() {
+      var a = calState.anchor;
+      if (calState.view === 'week') {
+        var thu = calAddDays(calMonday(a), 3);              // the month most of the week belongs to
+        calState.anchor = new Date(thu.getFullYear(), thu.getMonth(), 1);
+        calState.view = 'month';
+      } else if (calState.view === 'month') {
+        calState.view = 'year';
+      } else {
+        return;
+      }
+      calState.selected = '';
+      renderCurrentCategoryView();
+    }
+
     function calendarPopoverHtml() {
       function row(act, a, label, sel) {
         return '<div class="popover-item ' + (sel ? 'selected' : '') + '" data-act="' + act + '" data-a="' + a + '"><span>' + label + '</span><div class="check-box-icon">✓</div></div>';
       }
       return '<div class="popover-section-label">View</div><div class="popover-menu-list">' +
-        row('calView', 'week', 'Week', calState.view === 'week') + row('calView', 'month', 'Month', calState.view === 'month') + row('calView', 'year', 'Year', calState.view === 'year') +
+        row('calView', 'week', 'Week', calState.view === 'week') + row('calView', 'month', 'Month', calState.view === 'month') +
         '</div><div class="popover-divider"></div><div class="popover-section-label">Show</div><div class="popover-menu-list">' +
         row('calToggle', 'showTv', 'TV shows', calState.showTv) + row('calToggle', 'showMovies', 'Movies', calState.showMovies) +
         '</div><div class="popover-divider"></div><div class="popover-section-label">Status</div><div class="popover-menu-list">' +
         row('calToggle', 'showWatched', 'Watched', calState.showWatched) + row('calToggle', 'showUnwatched', 'Unwatched', calState.showUnwatched) + '</div>';
     }
 
+    /* One tick can cover several episodes (the xN box): everything watched -> mark all unwatched, otherwise mark all watched */
     function calTick(el) {
-      var row = parseInt(el.dataset.b, 10), sheet = el.dataset.a, was = el.dataset.c === 'true', now = !was;
-      if (!row) return;
+      var rows = String(el.dataset.b || '').split(',').map(function(r) { return parseInt(r, 10); }).filter(function(r) { return r > 0; });
+      var sheet = el.dataset.a, was = el.dataset.c === 'true', now = !was;
+      if (!rows.length) return;
       el.classList.add('animating-tick');
       el.innerHTML = now ? greenCheckSvg : greyCircleCheckSvg;
       GAS.run
         .withSuccessHandler(function(res) { if (res && res.success === false) showToast(res.message || 'Could not update'); })
         .withFailureHandler(function() { showToast('Could not update'); })
-        .apiMarkWatched({ sheetName: sheet, rowIndices: [row], isWatched: now, dateWatched: now ? new Date().toLocaleDateString('en-GB') : '' });
+        .apiMarkWatched({ sheetName: sheet, rowIndices: rows, isWatched: now, dateWatched: now ? new Date().toLocaleDateString('en-GB') : '' });
       // the change is applied to the local data straight away; redraw once the pulse has played
       setTimeout(renderCurrentCategoryView, 220);
     }
@@ -2458,12 +2585,20 @@ let currentDetailItem = null;
       calView: function(el) { calState.view = el.dataset.a; calState.selected = ''; renderPopoverContent(); renderCurrentCategoryView(); },
       calToggle: function(el) { calState[el.dataset.a] = !calState[el.dataset.a]; renderPopoverContent(); renderCurrentCategoryView(); },
       calNav: function(el) { calNavigate(parseInt(el.dataset.a, 10)); },
+      calTitle: function() { calZoomOut(); },
       calToday: function() { calState.anchor = new Date(); calState.selected = ''; renderCurrentCategoryView(); },
       calDay: function(el) {
         var d = calFromKey(el.dataset.a);
         if (!d) return;
-        if (calState.view === 'year') { calState.view = 'month'; calState.anchor = d; }
-        calState.selected = (calState.selected === el.dataset.a && calState.view === 'month') ? '' : el.dataset.a;
+        var desktop = isDesktopBrowser();
+        if (calState.view === 'year') {
+          calState.view = 'month'; calState.anchor = d;
+          calState.selected = desktop ? '' : el.dataset.a;
+        } else if (!desktop) {
+          calState.selected = (calState.selected === el.dataset.a) ? '' : el.dataset.a;   // phone: list the day under the grid
+        } else {
+          return;                                                                          // desktop: the date box already shows everything
+        }
         renderCurrentCategoryView();
       },
       calMonth: function(el) {
