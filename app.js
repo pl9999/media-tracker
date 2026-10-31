@@ -1,3 +1,9 @@
+    /* Never shown inside another site's frame (clickjacking): a framed copy blanks itself. */
+    if (window.top !== window.self) {
+      document.documentElement.innerHTML = '';
+      throw new Error('This page cannot be displayed in a frame.');
+    }
+
     var rawData = { movies: [], tvShows: [], movieRecommendations: [], tvRecommendations: [] };
     /* ================================================================
        Configuration: set GAS_URL to your Apps Script web app URL
@@ -115,7 +121,7 @@
     var currentCategory = 'tv';
     var currentViewMode = 'list';
     var activeSubMenu = 'main';
-
+    
     var selectedTvStatuses = {
       'history': false,
       'watch-next': true,
@@ -382,27 +388,154 @@
       searchDebounce = setTimeout(renderCurrentCategoryView, 200);
     }
 
+    /* ================================================================
+       Spring animation for every menu / sheet / pop-up (open and close)
+       This is SwiftUI's  .spring(response: 0.42, dampingFraction: 0.7)  :
+         - response        = the time one undamped oscillation takes (it sets the speed)
+         - dampingFraction = 0.7 (< 1) = UNDERDAMPED: the motion overshoots a little and settles with a small bounce
+       The curve is the damped-oscillator solution, sampled into keyframes for the Web Animations API.
+       ================================================================ */
+    var SPRING_RESPONSE = 0.42;
+    var SPRING_DAMPING = 0.7;
+    var SPRING_REST = { x: 0, y: 0, scale: 1, opacity: 1 };
+    var SPRING_GONE = { x: 0, y: 0, scale: 1, opacity: 0 };
+
+    /* progress 0 -> 1 (overshooting 1 while underdamped) after t seconds */
+    function springValue(t, response, zeta) {
+      var wn = 2 * Math.PI / response;
+      if (zeta < 1) {
+        var wd = wn * Math.sqrt(1 - zeta * zeta);
+        return 1 - Math.exp(-zeta * wn * t) * (Math.cos(wd * t) + (zeta * wn / wd) * Math.sin(wd * t));
+      }
+      return 1 - Math.exp(-wn * t) * (1 + wn * t);   // critically damped: no bounce
+    }
+
+    /* seconds until the motion is within 0.2% of its end point */
+    function springDuration(response, zeta) {
+      var wn = 2 * Math.PI / response;
+      var env = zeta < 1 ? Math.sqrt(1 - zeta * zeta) : 1;
+      var t = Math.log(500 / env) / (Math.max(zeta, 0.05) * wn);
+      return Math.min(1.4, Math.max(0.25, t));
+    }
+
+    function springTransform(s) {
+      if (s.x === 0 && s.y === 0 && s.scale === 1) return 'none';
+      return 'translate3d(' + s.x.toFixed(2) + 'px,' + s.y.toFixed(2) + 'px,0) scale(' + Math.max(0.01, s.scale).toFixed(4) + ')';
+    }
+
+    function springFrames(from, to) {
+      var dur = springDuration(SPRING_RESPONSE, SPRING_DAMPING);
+      var n = Math.max(24, Math.round(dur * 60));
+      var frames = [];
+      for (var i = 0; i <= n; i++) {
+        var p = (i === n) ? 1 : springValue(dur * i / n, SPRING_RESPONSE, SPRING_DAMPING);
+        var st = {
+          x: from.x + (to.x - from.x) * p,
+          y: from.y + (to.y - from.y) * p,
+          scale: from.scale + (to.scale - from.scale) * p
+        };
+        frames.push({
+          offset: i / n,
+          opacity: Math.min(1, Math.max(0, from.opacity + (to.opacity - from.opacity) * p)),   // opacity never goes past its limits
+          transform: springTransform(st)
+        });
+      }
+      return { frames: frames, duration: Math.round(dur * 1000) };
+    }
+
+    function prefersReducedMotion() {
+      try { return !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches); } catch (e) { return false; }
+    }
+
+    function springApply(el, s) {
+      el.style.opacity = String(s.opacity);
+      el.style.transform = springTransform(s);
+    }
+
+    /* where an element visually is right now (so an interrupted animation carries on smoothly) */
+    function springCurrent(el) {
+      var st = { x: 0, y: 0, scale: 1, opacity: 1 };
+      try {
+        var cs = window.getComputedStyle(el);
+        var o = parseFloat(cs.opacity); if (!isNaN(o)) st.opacity = o;
+        var m = String(cs.transform).match(/^matrix\(([^)]+)\)$/);
+        if (m) { var v = m[1].split(',').map(parseFloat); st.scale = v[0]; st.x = v[4]; st.y = v[5]; }
+      } catch (e) {}
+      return st;
+    }
+
+    /* Animate el from one state to another with the spring. The end state is applied as the real style at once, so
+       nothing flashes when the animation ends. Without animation support (or with "reduce motion") it just jumps there. */
+    function springAnimate(el, from, to, onDone) {
+      if (!el) { if (onDone) onDone(); return; }
+      var token = (el.__springToken = (el.__springToken || 0) + 1);
+      var running = el.__springAnim || null;
+      if (running) { from = springCurrent(el); try { running.cancel(); } catch (e) {} el.__springAnim = null; }
+
+      if (typeof el.animate !== 'function' || prefersReducedMotion()) {
+        springApply(el, to);
+        if (onDone) onDone();
+        return;
+      }
+      var spec = springFrames(from, to);
+      var anim = el.animate(spec.frames, { duration: spec.duration, easing: 'linear', fill: 'both' });
+      el.__springAnim = anim;
+      springApply(el, to);
+      anim.onfinish = function() {
+        if (el.__springToken !== token) return;       // a newer animation took over
+        el.__springAnim = null;
+        try { anim.cancel(); } catch (e) {}
+        if (onDone) onDone();
+      };
+    }
+
+    /* open: the dimmed backdrop fades in while the card springs in */
+    function springShow(overlay, card, display, cardFrom, overlayFrom) {
+      overlay.style.display = display;
+      springAnimate(overlay, overlayFrom || SPRING_GONE, SPRING_REST);
+      if (card) springAnimate(card, cardFrom || { x: 0, y: 16, scale: 0.86, opacity: 0 }, SPRING_REST);
+    }
+
+    /* close: the card springs away while the backdrop fades; display:none only once it has finished */
+    function springHide(overlay, card, cardTo, overlayTo, onDone) {
+      overlay.style.pointerEvents = 'none';
+      springAnimate(overlay, SPRING_REST, overlayTo || SPRING_GONE, function() {
+        overlay.style.display = 'none';
+        overlay.style.pointerEvents = '';
+        overlay.style.opacity = '';
+        overlay.style.transform = '';
+        if (card) { card.style.opacity = ''; card.style.transform = ''; }
+        if (onDone) onDone();
+      });
+      if (card) springAnimate(card, SPRING_REST, cardTo || { x: 0, y: 10, scale: 0.9, opacity: 0 });
+    }
+
+    var POPOVER_FROM = { x: 0, y: -12, scale: 0.82, opacity: 0 };
+    var POPOVER_TO = { x: 0, y: -8, scale: 0.88, opacity: 0 };
+    var SHEET_FROM = { x: 0, y: 56, scale: 0.97, opacity: 0 };    // full-screen media info slides up like a sheet
+
+    function openPopoverMenu() {
+      var overlay = document.getElementById('popoverOverlay');
+      activeSubMenu = 'main';
+      renderPopoverContent();
+      overlay.classList.add('show');
+      springShow(overlay, document.getElementById('dropdownPopover'), 'block', POPOVER_FROM);
+    }
+
     function togglePopoverMenu() {
       var overlay = document.getElementById('popoverOverlay');
-      if (overlay.classList.contains('show')) {
-        closePopoverMenu();
-      } else {
-        activeSubMenu = 'main';
-        renderPopoverContent();
-        overlay.style.display = 'block';
-        setTimeout(function() {
-          overlay.classList.add('show');
-        }, 10);
-      }
+      if (overlay.classList.contains('show')) closePopoverMenu(); else openPopoverMenu();
     }
 
     function closePopoverMenu() {
       var overlay = document.getElementById('popoverOverlay');
+      if (!overlay.classList.contains('show')) return;
       overlay.classList.remove('show');
-      setTimeout(function() {
-        overlay.style.display = 'none';
-      }, 200);
+      springHide(overlay, document.getElementById('dropdownPopover'), POPOVER_TO);
     }
+
+    /* choosing a view / filter / sort option: collapse the menu so the refreshed view is visible straight away */
+    function closeMenuAfterSelect() { closePopoverMenu(); }
 
     function toggleTvStatus(key) {
       if (key === 'all-az') {
@@ -433,7 +566,7 @@
 
         var genresList = getAllGenres();
         html += '<div class="popover-item" data-act="setGenreFilter" data-a="all"><span>' + (selectedGenre === 'all' ? '✓ ' : '') + 'All genres</span></div>';
-
+        
         genresList.forEach(function(g) {
           html += '<div class="popover-item" data-act="setGenreFilter" data-a="' + escapeHtml(g) + '"><span>' + (selectedGenre === g ? '✓ ' : '') + escapeHtml(g) + '</span></div>';
         });
@@ -629,7 +762,7 @@
         renderRecommendationsView(grid, search, activeMode);
       }
 
-      var shouldScrollToBottom = (currentCategory === 'tv' && selectedTvStatuses['history']) ||
+      var shouldScrollToBottom = (currentCategory === 'tv' && selectedTvStatuses['history']) || 
                                  (currentCategory === 'movies' && selectedMovieStatuses['watched'] && selectedMovieSort === 'watched-asc');
       if (shouldScrollToBottom) {
         requestAnimationFrame(function() {
@@ -1090,7 +1223,7 @@ function renderTvSectionGroup(container, sectionTitle, items, viewMode, isHistor
     if (viewMode === 'grid') {
       card = document.createElement('div');
       card.className = 'bingers-grid-card' + (isHistory ? ' is-history-item' : '');
-
+      
       var epTagStr = item.nextEpTag || (isAllAz ? (item.watchedEps + '/' + item.totalEps + ' eps') : 'S01E01');
       var epTitleText = item.nextEpTitle ? ' · ' + item.nextEpTitle : '';
 
@@ -1104,7 +1237,7 @@ function renderTvSectionGroup(container, sectionTitle, items, viewMode, isHistor
     } else {
       card = document.createElement('div');
       card.className = 'bingers-list-card' + (isHistory ? ' is-history-item' : '');
-
+      
       var isWatched = isAllAz ? item.isFullyWatched : !!item.isWatched;
       var epTag = item.nextEpTag || (isAllAz ? (item.watchedEps + '/' + item.totalEps + ' watched') : 'S01 E01');
       var seqStr = item.nextEpSeqStr || (item.totalEps ? ('1/' + item.totalEps) : '');
@@ -1344,7 +1477,7 @@ function renderTvSectionGroup(container, sectionTitle, items, viewMode, isHistor
 
       document.getElementById('actionSheetTitle').innerText = isWatched ? 'Watched' : showTitle;
       document.getElementById('actionToggleWatchedBtn').innerText = isWatched ? 'Mark not watched' : 'Mark watched';
-      document.getElementById('actionSheetOverlay').style.display = 'grid';
+      openActionSheetOverlay();
     }
 
     function openActionSheetForMovie(event, sheetName, rowIndex, title, isWatched) {
@@ -1358,11 +1491,17 @@ function renderTvSectionGroup(container, sectionTitle, items, viewMode, isHistor
 
       document.getElementById('actionSheetTitle').innerText = isWatched ? 'Watched' : title;
       document.getElementById('actionToggleWatchedBtn').innerText = isWatched ? 'Mark not watched' : 'Mark watched';
-      document.getElementById('actionSheetOverlay').style.display = 'grid';
+      openActionSheetOverlay();
+    }
+
+    function openActionSheetOverlay() {
+      var overlay = document.getElementById('actionSheetOverlay');
+      springShow(overlay, overlay.querySelector('.action-sheet-card'), 'grid');
     }
 
     function closeActionSheet() {
-      document.getElementById('actionSheetOverlay').style.display = 'none';
+      var overlay = document.getElementById('actionSheetOverlay');
+      springHide(overlay, overlay.querySelector('.action-sheet-card'));
       activeItemTarget = null;
     }
 
@@ -1418,8 +1557,14 @@ function renderTvSectionGroup(container, sectionTitle, items, viewMode, isHistor
       }
     }
 
-    function openAddModal() { document.getElementById('addModal').style.display = 'grid'; }
-    function closeAddModal() { document.getElementById('addModal').style.display = 'none'; }
+    function openAddModal() {
+      var overlay = document.getElementById('addModal');
+      springShow(overlay, overlay.querySelector('.modal-content'), 'grid');
+    }
+    function closeAddModal() {
+      var overlay = document.getElementById('addModal');
+      springHide(overlay, overlay.querySelector('.modal-content'));
+    }
 
     function searchTMDB() {
       var q = document.getElementById('tmdbSearchInput').value.trim();
@@ -1547,19 +1692,18 @@ function renderTvSectionGroup(container, sectionTitle, items, viewMode, isHistor
         addPopupTimer = setTimeout(hideAddPopup, 4500);
       }
 
-      if (overlay.style.display !== 'grid') {
-        overlay.style.display = 'grid';
-        setTimeout(function() { overlay.classList.add('show'); }, 10);
+      if (!overlay.classList.contains('show')) {
+        overlay.classList.add('show');
+        springShow(overlay, overlay.querySelector('.add-popup-card'), 'grid', { x: 0, y: 14, scale: 0.8, opacity: 0 });
       }
     }
 
     function hideAddPopup() {
       clearTimeout(addPopupTimer);
       var overlay = document.getElementById('addPopupOverlay');
+      if (!overlay.classList.contains('show')) return;
       overlay.classList.remove('show');
-      setTimeout(function() {
-        if (!overlay.classList.contains('show')) overlay.style.display = 'none';
-      }, 250);
+      springHide(overlay, overlay.querySelector('.add-popup-card'), { x: 0, y: 10, scale: 0.9, opacity: 0 });
     }
 
     /* ---------- Small helpers ---------- */
@@ -1618,7 +1762,7 @@ function renderTvSectionGroup(container, sectionTitle, items, viewMode, isHistor
 function toggleWatchedDirectly(event, sheetName, rowIndex, isWatched) {
   event.stopPropagation();
   var newWatched = !isWatched;
-
+  
   var btn = event.currentTarget;
   var card = btn.closest('.bingers-list-card') || btn.closest('.bingers-grid-card');
 
@@ -1666,7 +1810,7 @@ let currentDetailItem = null;
     function openMediaDetail(item) {
       currentDetailItem = item;
       const overlay = document.getElementById('mediaDetailOverlay');
-      overlay.style.display = 'block';
+      springShow(overlay, null, 'block', null, SHEET_FROM);
 
       document.getElementById('detailTitle').innerText = item.title;
       const hero = document.getElementById('detailHero');
@@ -1693,7 +1837,7 @@ let currentDetailItem = null;
     }
 
     function closeMediaDetail() {
-      document.getElementById('mediaDetailOverlay').style.display = 'none';
+      springHide(document.getElementById('mediaDetailOverlay'), null, null, SHEET_FROM);
       currentDetailItem = null;
     }
 
@@ -1973,11 +2117,13 @@ let currentDetailItem = null;
     }
 
     function promptBulkWatch() {
-      document.getElementById('confirmModal').style.display = 'grid';
+      var overlay = document.getElementById('confirmModal');
+      springShow(overlay, overlay.querySelector('.action-sheet-card'), 'grid');
     }
 
     function closeConfirmModal() {
-      document.getElementById('confirmModal').style.display = 'none';
+      var overlay = document.getElementById('confirmModal');
+      springHide(overlay, overlay.querySelector('.action-sheet-card'));
     }
 
     function executeBulkWatch() {
@@ -2564,12 +2710,12 @@ let currentDetailItem = null;
 
       switchMainCategory: function(el) { switchMainCategory(el.dataset.a, el); },
       subMenu: function(el) { activeSubMenu = el.dataset.a; renderPopoverContent(); },
-      setGenreFilter: function(el) { setGenreFilter(el.dataset.a); },
-      setViewMode: function(el) { setViewMode(el.dataset.a); },
-      toggleTvStatus: function(el) { toggleTvStatus(el.dataset.a); },
-      setMovieSort: function(el) { setMovieSort(el.dataset.a); },
-      toggleMovieStatus: function(el) { toggleMovieStatus(el.dataset.a); },
-      toggleExploreOption: function(el) { toggleExploreOption(el.dataset.a); },
+      setGenreFilter: function(el) { setGenreFilter(el.dataset.a); closeMenuAfterSelect(); },
+      setViewMode: function(el) { setViewMode(el.dataset.a); closeMenuAfterSelect(); },
+      toggleTvStatus: function(el) { toggleTvStatus(el.dataset.a); closeMenuAfterSelect(); },
+      setMovieSort: function(el) { setMovieSort(el.dataset.a); closeMenuAfterSelect(); },
+      toggleMovieStatus: function(el) { toggleMovieStatus(el.dataset.a); closeMenuAfterSelect(); },
+      toggleExploreOption: function(el) { toggleExploreOption(el.dataset.a); closeMenuAfterSelect(); },
       changeResumeWeeks: function(el) { changeResumeWeeks(parseInt(el.dataset.a, 10)); },
 
       toggleWatchedDirectly: function(el, ev) {
@@ -2582,8 +2728,8 @@ let currentDetailItem = null;
       },
       recAction: function(el) { recAction(el.dataset.a, el.dataset.b, el.dataset.c, el); },
 
-      calView: function(el) { calState.view = el.dataset.a; calState.selected = ''; renderPopoverContent(); renderCurrentCategoryView(); },
-      calToggle: function(el) { calState[el.dataset.a] = !calState[el.dataset.a]; renderPopoverContent(); renderCurrentCategoryView(); },
+      calView: function(el) { calState.view = el.dataset.a; calState.selected = ''; renderCurrentCategoryView(); closeMenuAfterSelect(); },
+      calToggle: function(el) { calState[el.dataset.a] = !calState[el.dataset.a]; renderCurrentCategoryView(); closeMenuAfterSelect(); },
       calNav: function(el) { calNavigate(parseInt(el.dataset.a, 10)); },
       calTitle: function() { calZoomOut(); },
       calToday: function() { calState.anchor = new Date(); calState.selected = ''; renderCurrentCategoryView(); },
@@ -2631,10 +2777,9 @@ let currentDetailItem = null;
 
     /* ---------- start-up ---------- */
     (function boot() {
-      // one-time convenience: https://…/media-tracker/#<access code> stores the code, then removes it from the address bar
-      var h = (location.hash || '').replace(/^#/, '');
-      if (/^[A-Za-z0-9]{16,64}$/.test(h)) {
-        memoryAccessCode = h;
+      // An access code in the address bar would end up in browser history / sync, so it is never accepted from the URL
+      // (and is wiped from it if someone pastes one there).
+      if (/^#[A-Za-z0-9]{16,64}$/.test(location.hash || '')) {
         try { history.replaceState(null, '', location.pathname + location.search); } catch (e) {}
       }
       if (getAccessCode()) {
