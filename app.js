@@ -121,7 +121,7 @@
     var currentCategory = 'tv';
     var currentViewMode = 'list';
     var activeSubMenu = 'main';
-    
+
     var selectedTvStatuses = {
       'history': false,
       'watch-next': true,
@@ -566,7 +566,7 @@
 
         var genresList = getAllGenres();
         html += '<div class="popover-item" data-act="setGenreFilter" data-a="all"><span>' + (selectedGenre === 'all' ? '✓ ' : '') + 'All genres</span></div>';
-        
+
         genresList.forEach(function(g) {
           html += '<div class="popover-item" data-act="setGenreFilter" data-a="' + escapeHtml(g) + '"><span>' + (selectedGenre === g ? '✓ ' : '') + escapeHtml(g) + '</span></div>';
         });
@@ -762,7 +762,7 @@
         renderRecommendationsView(grid, search, activeMode);
       }
 
-      var shouldScrollToBottom = (currentCategory === 'tv' && selectedTvStatuses['history']) || 
+      var shouldScrollToBottom = (currentCategory === 'tv' && selectedTvStatuses['history']) ||
                                  (currentCategory === 'movies' && selectedMovieStatuses['watched'] && selectedMovieSort === 'watched-asc');
       if (shouldScrollToBottom) {
         requestAnimationFrame(function() {
@@ -1223,7 +1223,7 @@ function renderTvSectionGroup(container, sectionTitle, items, viewMode, isHistor
     if (viewMode === 'grid') {
       card = document.createElement('div');
       card.className = 'bingers-grid-card' + (isHistory ? ' is-history-item' : '');
-      
+
       var epTagStr = item.nextEpTag || (isAllAz ? (item.watchedEps + '/' + item.totalEps + ' eps') : 'S01E01');
       var epTitleText = item.nextEpTitle ? ' · ' + item.nextEpTitle : '';
 
@@ -1237,7 +1237,7 @@ function renderTvSectionGroup(container, sectionTitle, items, viewMode, isHistor
     } else {
       card = document.createElement('div');
       card.className = 'bingers-list-card' + (isHistory ? ' is-history-item' : '');
-      
+
       var isWatched = isAllAz ? item.isFullyWatched : !!item.isWatched;
       var epTag = item.nextEpTag || (isAllAz ? (item.watchedEps + '/' + item.totalEps + ' watched') : 'S01 E01');
       var seqStr = item.nextEpSeqStr || (item.totalEps ? ('1/' + item.totalEps) : '');
@@ -1541,7 +1541,7 @@ function renderTvSectionGroup(container, sectionTitle, items, viewMode, isHistor
 
     function handleActionEditDate() {
       if (!activeItemTarget) return;
-      var newDate = prompt('Enter watch date (DD/MM/YYYY):', new Date().toLocaleDateString('en-GB'));
+      var newDate = prompt('Enter watch date (DD/MM/YY):', todayDMYShort());
       if (newDate) {
         showToast('Updating date...');
         closeActionSheet();
@@ -1713,6 +1713,13 @@ function renderTvSectionGroup(container, sectionTitle, items, viewMode, isHistor
       return (d === 'TBC') ? 'TBC' : '';
     }
 
+    /* today as dd/mm/yy (the format used in the spreadsheet); the backend also accepts dd/mm/yyyy */
+    function todayDMYShort() {
+      var d = new Date();
+      function two(n) { return (n < 10 ? '0' : '') + n; }
+      return two(d.getDate()) + '/' + two(d.getMonth() + 1) + '/' + two(d.getFullYear() % 100);
+    }
+
     /* TMDB gives yyyy-mm-dd; the episode list shows dd/mm/yy */
     function isoToDMYShort(s) {
       var m = String(s || '').match(/^(\d{4})-(\d{2})-(\d{2})/);
@@ -1762,7 +1769,7 @@ function renderTvSectionGroup(container, sectionTitle, items, viewMode, isHistor
 function toggleWatchedDirectly(event, sheetName, rowIndex, isWatched) {
   event.stopPropagation();
   var newWatched = !isWatched;
-  
+
   var btn = event.currentTarget;
   var card = btn.closest('.bingers-list-card') || btn.closest('.bingers-grid-card');
 
