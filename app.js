@@ -960,6 +960,22 @@
         '</div>';
     }
 
+    /* the IMDb logo: yellow rounded label (drawn with CSS, no image to load) */
+    var IMDB_LOGO_HTML = '<span class="imdb-logo" aria-label="IMDb">IMDb</span>';
+
+    function ratingValid_(v) {
+      return v !== undefined && v !== null && String(v).trim() !== '' && !/^(tbc|n\/a)$/i.test(String(v).trim());
+    }
+
+    /* Movies list: one line with the IMDb and Rotten Tomatoes ratings */
+    function ratingsLineHtml(item) {
+      var parts = [];
+      if (ratingValid_(item.imdbRating)) parts.push('<span class="rating-chip">' + IMDB_LOGO_HTML + ' ' + escapeHtml(item.imdbRating) + '</span>');
+      if (ratingValid_(item.rtRating)) parts.push('<span class="rating-chip">🍅 ' + escapeHtml(item.rtRating) + '</span>');
+      else if (ratingValid_(item.tmdbRating)) parts.push('<span class="rating-chip">TMDB ' + escapeHtml(item.tmdbRating) + '</span>');
+      return '<div class="card-ratings-line">' + (parts.length ? parts.join('') : '<span class="rating-none">No ratings yet</span>') + '</div>';
+    }
+
     function movieCreditLine(item) {
       var parts = [];
       var dir = item.director && !/^(n\/a|tbc)$/i.test(item.director) ? item.director : '';
@@ -1314,8 +1330,7 @@ function renderTvSectionGroup(container, sectionTitle, items, viewMode, isHistor
       '<div class="card-info">' +
       '<div class="card-title-text">' + escapeHtml(item.title) + '</div>' +
       '<div class="card-subline">' + escapeHtml(sublineStr) + '</div>' +
-      (movieCreditLine(item) ? '<div class="card-credits-line">' + escapeHtml(movieCreditLine(item)) + '</div>' : '') +
-      '<div class="card-synopsis-line">' + escapeHtml(item.synopsis || 'No overview available.') + '</div>' +
+      ratingsLineHtml(item) +
       '</div>' +
       '<button class="tick-action-btn" data-act="toggleWatchedDirectly" data-a="' + escapeHtml(item.sheetName) + '" data-b="' + (parseInt(item.rowIndex, 10) || 0) + '" data-c="' + (isWatched ? 'true' : 'false') + '">' +
       (isWatched ? greenCheckSvg : greyCircleCheckSvg) +
@@ -1582,8 +1597,8 @@ function renderTvSectionGroup(container, sectionTitle, items, viewMode, isHistor
             return;
           }
           results.forEach(function(item) {
-            // Shows: dd/mm/yyyy.  Movies are shown as before.
-            var dateText = (type === 'tv') ? isoToDMY(item.date) : (item.date || '');
+            // Shows: dd/mm/yy.  Movies are shown as before.
+            var dateText = (type === 'tv') ? isoToDMYShort(item.date) : (item.date || '');
 
             var row = document.createElement('div');
             row.style.cssText = 'display:flex; align-items:center; justify-content:space-between; background:#1c1c1e; padding:0.6rem; border-radius:12px; gap:0.6rem;';
@@ -1904,16 +1919,31 @@ let currentDetailItem = null;
       }
       html += '</div>';
 
-      html += '<div class="detail-meta-sub">' + escapeHtml(status) + ' · ' + escapeHtml(releaseYear) + ' · ' + escapeHtml(runtime) + ' · ' + escapeHtml(network) + '</div>';
+      var metaParts = [status, releaseYear, runtime];
+      if (typeStr !== 'movie') metaParts.push(network);          // a movie has no network, and "Movie" is redundant
+      html += '<div class="detail-meta-sub">' + metaParts.map(function(p) { return escapeHtml(p); }).join(' · ') + '</div>';
       html += '<div class="detail-synopsis">' + escapeHtml(synopsis) + '</div>';
       html += '<div class="detail-genres">' + escapeHtml(genres) + '</div>';
 
+      // ratings are buttons that open the item's listing on the site they come from
+      var titleForLinks = String(item.title || '').replace(/\s*\(\d{4}\)\s*$/, '').trim();
+      var imdbHref = imdbId ? 'https://www.imdb.com/title/' + imdbId + '/' : 'https://www.imdb.com/find/?s=tt&q=' + encodeURIComponent(titleForLinks);
+      var rtHref = 'https://www.rottentomatoes.com/search?search=' + encodeURIComponent(titleForLinks);
       html += '<div class="detail-ratings-row">' +
-              '<div class="rating-badge">⭐ ' + escapeHtml(imdbRating) + '</div>' +
-              (rtText ? '<div class="rating-badge">🍅 ' + escapeHtml(rtText) + '</div>' : '') +
+              '<a class="rating-btn" href="' + imdbHref + '" target="_blank" rel="noopener noreferrer" aria-label="IMDb rating ' + escapeHtml(imdbRating) + ' - open on IMDb">' +
+                IMDB_LOGO_HTML + '<span class="rating-btn-val">' + escapeHtml(imdbRating) + '</span><span class="rating-btn-go">↗</span></a>' +
+              '<a class="rating-btn" href="' + rtHref + '" target="_blank" rel="noopener noreferrer" aria-label="Rotten Tomatoes rating ' + escapeHtml(rtText || 'not available') + ' - open on Rotten Tomatoes">' +
+                '<span class="rt-icon">🍅</span><span class="rating-btn-val">' + escapeHtml(rtText || '\u2014') + '</span><span class="rating-btn-go">↗</span></a>' +
               (legacyTmdb ? '<div class="rating-badge">TMDB ' + escapeHtml(legacyTmdb) + '</div>' : '') +
-              (imdbId ? '<a class="rating-badge" href="https://www.imdb.com/title/' + imdbId + '" target="_blank" rel="noopener noreferrer">IMDb ↗</a>' : '') +
               '</div>';
+
+      if (typeStr === 'movie') {
+        var trailerKey = (tmdbData && tmdbData.trailer && /^[A-Za-z0-9_-]{6,20}$/.test(String(tmdbData.trailer.key || ''))) ? tmdbData.trailer.key : '';
+        var trailerHref = trailerKey ? 'https://www.youtube.com/watch?v=' + trailerKey
+                                     : 'https://www.youtube.com/results?search_query=' + encodeURIComponent((titleForLinks + ' ' + releaseYear + ' trailer').trim());
+        html += '<div class="detail-trailer-row"><a class="trailer-link" href="' + trailerHref + '" target="_blank" rel="noopener noreferrer">' +
+                '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="2" y="5" width="20" height="14" rx="4" fill="#ff0033"/><polygon points="10,9 16,12 10,15" fill="#fff"/></svg>Watch trailer</a></div>';
+      }
 
       if (typeStr === 'tv') {
         html += '<div class="section-title" style="margin-top:1rem;">Seasons</div>';
@@ -1930,6 +1960,18 @@ let currentDetailItem = null;
                     '</div>' +
                     '</div>';
           });
+        }
+      }
+
+      if (typeStr === 'movie') {
+        var directorText = (tmdbData && tmdbData.credits && tmdbData.credits.directors && tmdbData.credits.directors.length) ? tmdbData.credits.directors.join(', ') : '';
+        if (!directorText) {
+          var sheetDirector = item.director || rowSrc.director;
+          if (sheetDirector && !/^(n\/a|tbc)$/i.test(String(sheetDirector).trim())) directorText = String(sheetDirector);
+        }
+        if (directorText) {
+          html += '<div class="section-title" style="margin-top:1rem;">Director</div>';
+          html += '<div class="detail-director">' + escapeHtml(directorText) + '</div>';
         }
       }
 
@@ -2541,8 +2583,7 @@ let currentDetailItem = null;
       var html = '<div class="cal-year">';
       for (var m = 0; m < 12; m++) {
         var first = new Date(y, m, 1), days = new Date(y, m + 1, 0).getDate(), lead = (first.getDay() + 6) % 7;
-        var isCurrentMonth = (y === now.getFullYear() && m === now.getMonth());
-        html += '<div class="cal-mini"><div class="cal-mini-title' + (isCurrentMonth ? ' cal-current-month' : '') + '" data-act="calMonth" data-a="' + y + '-' + String(m + 1).padStart(2, '0') + '">' + CAL_MONTHS[m] + '</div><div class="cal-mini-grid">';
+        html += '<div class="cal-mini"><div class="cal-mini-title" data-act="calMonth" data-a="' + y + '-' + String(m + 1).padStart(2, '0') + '">' + CAL_MONTHS[m] + '</div><div class="cal-mini-grid">';
         ['M', 'T', 'W', 'T', 'F', 'S', 'S'].forEach(function(c) { html += '<div class="cal-mini-dow">' + c + '</div>'; });
         for (var b = 0; b < lead; b++) html += '<div class="cal-mini-day cal-blank"></div>';
         for (var d = 1; d <= days; d++) {
