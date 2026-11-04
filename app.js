@@ -121,7 +121,7 @@
     var currentCategory = 'tv';
     var currentViewMode = 'list';
     var activeSubMenu = 'main';
-
+    
     var selectedTvStatuses = {
       'history': false,
       'watch-next': true,
@@ -566,7 +566,7 @@
 
         var genresList = getAllGenres();
         html += '<div class="popover-item" data-act="setGenreFilter" data-a="all"><span>' + (selectedGenre === 'all' ? '✓ ' : '') + 'All genres</span></div>';
-
+        
         genresList.forEach(function(g) {
           html += '<div class="popover-item" data-act="setGenreFilter" data-a="' + escapeHtml(g) + '"><span>' + (selectedGenre === g ? '✓ ' : '') + escapeHtml(g) + '</span></div>';
         });
@@ -762,7 +762,7 @@
         renderRecommendationsView(grid, search, activeMode);
       }
 
-      var shouldScrollToBottom = (currentCategory === 'tv' && selectedTvStatuses['history']) ||
+      var shouldScrollToBottom = (currentCategory === 'tv' && selectedTvStatuses['history']) || 
                                  (currentCategory === 'movies' && selectedMovieStatuses['watched'] && selectedMovieSort === 'watched-asc');
       if (shouldScrollToBottom) {
         requestAnimationFrame(function() {
@@ -1023,27 +1023,21 @@
             '<div class="grid-card-title' + (isMovie ? ' title-tight' : '') + '">' + escapeHtml(item.title) + '</div>' +
             '<div class="grid-card-sub">' + escapeHtml(gridSub) + '</div>' + actions;
         } else {
-          var bits = [];
-          if (isMovie) {
-            if (yr) bits.push(yr);
-            if (item.runtime && item.runtime !== 'N/A') bits.push(item.runtime);
-          } else if (genreText) {
-            bits.push(genreText);
-          }
-          if (item.imdbRating && item.imdbRating !== 'TBC') bits.push('⭐ ' + item.imdbRating);
-          if (item.rtRating && item.rtRating !== 'TBC') bits.push('🍅 ' + item.rtRating);
-          else if (item.tmdbRating && item.tmdbRating !== 'TBC') bits.push('TMDB ' + item.tmdbRating);
+          // one fact per line: title (wraps) / year (+ runtime for movies) / genre / ratings / action buttons
+          var metaBits = [];
+          var firstYear = yearOf(item.date);                       // year first aired / released
+          if (firstYear) metaBits.push(firstYear);
+          if (isMovie && item.runtime && item.runtime !== 'N/A') metaBits.push(item.runtime);
 
-          var credits = isMovie ? movieCreditLine(item) : '';
-
-          card.className = 'bingers-list-card';
+          card.className = 'bingers-list-card rec-card';
           card.innerHTML = '<img class="card-poster" src="' + blankPoster + '" alt="">' +
             '<div class="card-info">' +
             '<div class="card-title-text">' + escapeHtml(item.title) + '</div>' +
-            '<div class="card-subline">' + escapeHtml(bits.join(' · ')) + '</div>' +
-            (credits ? '<div class="card-credits-line">' + escapeHtml(credits) + '</div>' : '') +
-            '<div class="card-synopsis-line">' + escapeHtml(item.synopsis || 'No overview available.') + '</div>' +
-            '</div>' + actions;
+            (metaBits.length ? '<div class="card-subline">' + escapeHtml(metaBits.join(' · ')) + '</div>' : '') +
+            (genreText ? '<div class="card-genre-line">' + escapeHtml(genreText) + '</div>' : '') +
+            ratingsLineHtml(item) +
+            actions +
+            '</div>';
         }
 
         targetParent.appendChild(card);
@@ -1239,7 +1233,7 @@ function renderTvSectionGroup(container, sectionTitle, items, viewMode, isHistor
     if (viewMode === 'grid') {
       card = document.createElement('div');
       card.className = 'bingers-grid-card' + (isHistory ? ' is-history-item' : '');
-
+      
       var epTagStr = item.nextEpTag || (isAllAz ? (item.watchedEps + '/' + item.totalEps + ' eps') : 'S01E01');
       var epTitleText = item.nextEpTitle ? ' · ' + item.nextEpTitle : '';
 
@@ -1253,7 +1247,7 @@ function renderTvSectionGroup(container, sectionTitle, items, viewMode, isHistor
     } else {
       card = document.createElement('div');
       card.className = 'bingers-list-card' + (isHistory ? ' is-history-item' : '');
-
+      
       var isWatched = isAllAz ? item.isFullyWatched : !!item.isWatched;
       var epTag = item.nextEpTag || (isAllAz ? (item.watchedEps + '/' + item.totalEps + ' watched') : 'S01 E01');
       var seqStr = item.nextEpSeqStr || (item.totalEps ? ('1/' + item.totalEps) : '');
@@ -1666,6 +1660,7 @@ function renderTvSectionGroup(container, sectionTitle, items, viewMode, isHistor
       GAS.run.withSuccessHandler(function(data) {
         applyLoadedData(data);
         renderCurrentCategoryView();
+        syncDetailTicks();
       }).getWebAppData();
     }
 
@@ -1784,7 +1779,7 @@ function renderTvSectionGroup(container, sectionTitle, items, viewMode, isHistor
 function toggleWatchedDirectly(event, sheetName, rowIndex, isWatched) {
   event.stopPropagation();
   var newWatched = !isWatched;
-
+  
   var btn = event.currentTarget;
   var card = btn.closest('.bingers-list-card') || btn.closest('.bingers-grid-card');
 
@@ -1948,12 +1943,13 @@ let currentDetailItem = null;
       if (typeStr === 'tv') {
         html += '<div class="section-title" style="margin-top:1rem;">Seasons</div>';
         if (tmdbData && tmdbData.seasons) {
+          var showStruct = getLocalShowStructure(item);   // null when the show is not in your spreadsheet: no ticks then
           tmdbData.seasons.forEach(function(season) {
             if (season.season_number === 0 && season.episode_count === 0) return;
             html += '<div class="season-accordion-item">' +
                     '<div class="season-header-row" data-act="toggleSeasonAccordion" data-a="' + safeTmdbId + '" data-b="' + (parseInt(season.season_number, 10) || 0) + '">' +
                     '<span>' + escapeHtml(season.name) + '</span>' +
-                    '<span style="color:var(--text-sub); font-size:0.85rem;">' + (parseInt(season.episode_count, 10) || 0) + ' episodes ▼</span>' +
+                    '<span class="season-header-right"><span style="color:var(--text-sub); font-size:0.85rem;">' + (parseInt(season.episode_count, 10) || 0) + ' episodes ▼</span>' + seasonTickHtml(showStruct, season.season_number) + '</span>' +
                     '</div>' +
                     '<div class="episode-list-container" id="season-episodes-' + safeTmdbId + '-' + (parseInt(season.season_number, 10) || 0) + '">' +
                     '<div style="padding:0.75rem 1.25rem; color:var(--text-sub); font-size:0.82rem;">Loading episodes...</div>' +
@@ -2165,53 +2161,127 @@ let currentDetailItem = null;
         .apiMarkWatched({ sheetName: 'Movies', rowIndices: [rowIndex], isWatched: newWatched, dateWatched: newWatched ? new Date().toLocaleDateString('en-GB') : '' });
     }
 
-    function promptBulkWatch() {
+    /* The TV show's rows in your spreadsheet: show header, season headers and episodes (null if it is not in the sheet) */
+    function getLocalShowStructure(item) {
+      if (!item || !rawData || !rawData.tvShows) return null;
+      var tid = String(item.tmdbId || '');
+      var t = String(item.title || '').trim().toLowerCase();
+      var out = { sheetName: 'TV shows', seasons: {} };
+      var inShow = false, found = false, curSeason = 0;
+      rawData.tvShows.forEach(function(row) {
+        var title = String(row.title || '').trim();
+        var kind = rowKind(title);
+        if (kind === 'show') {
+          inShow = (tid && String(row.tmdbId || '') === tid) || title.toLowerCase() === t;
+          if (inShow) { found = true; out.sheetName = row.sheetName || out.sheetName; }
+          curSeason = 0;
+          return;
+        }
+        if (!inShow) return;
+        if (kind === 'season') {
+          var m = title.match(/^Season\s+(\d+)/i);
+          curSeason = m ? parseInt(m[1], 10) : 0;
+          if (curSeason) { out.seasons[curSeason] = out.seasons[curSeason] || { num: curSeason, headerRow: 0, episodes: [] }; out.seasons[curSeason].headerRow = row.rowIndex; }
+        } else if (kind === 'episode') {
+          var em = title.match(/^S(\d+)E(\d+)/i);
+          var sn = em ? parseInt(em[1], 10) : curSeason;
+          var s = out.seasons[sn] || (out.seasons[sn] = { num: sn, headerRow: 0, episodes: [] });
+          s.episodes.push({ row: row.rowIndex, watched: calIsTrue(row.status) });
+        }
+      });
+      return found ? out : null;
+    }
+
+    function seasonTickHtml(struct, seasonNumber) {
+      var n = parseInt(seasonNumber, 10);
+      var s = struct && struct.seasons[n];
+      if (!s || !s.episodes.length) return '';
+      var all = s.episodes.every(function(e) { return e.watched; });
+      return '<button class="season-tick" data-act="seasonTick" data-a="' + n + '" data-c="' + (all ? 'true' : 'false') + '" aria-label="' +
+        (all ? 'Season ' + n + ' watched - mark as unwatched' : 'Mark season ' + n + ' as watched') + '">' + (all ? greenCheckSvg : greyCircleCheckSvg) + '</button>';
+    }
+
+    /* keep the ticks inside an open media info card in step with the data (season ticks and the episode list) */
+    function syncDetailTicks() {
+      var overlay = document.getElementById('mediaDetailOverlay');
+      if (!overlay || !currentDetailItem) return;
+      var st = getLocalShowStructure(currentDetailItem);
+      if (!st) return;
+      Array.prototype.forEach.call(overlay.querySelectorAll('.season-tick'), function(btn) {
+        var s = st.seasons[parseInt(btn.dataset.a, 10)];
+        var all = !!(s && s.episodes.length && s.episodes.every(function(e) { return e.watched; }));
+        btn.dataset.c = all ? 'true' : 'false';
+        btn.innerHTML = all ? greenCheckSvg : greyCircleCheckSvg;
+      });
+      Array.prototype.forEach.call(overlay.querySelectorAll('[data-act="toggleEpisodeTick"]'), function(btn) {
+        var row = parseInt(btn.dataset.row, 10);
+        var it = rawData.tvShows.find(function(r) { return r.rowIndex === row; });
+        if (!it) return;
+        var w = calIsTrue(it.status);
+        btn.dataset.watched = w ? '1' : '0';
+        btn.innerHTML = w ? greenCheckSvg : greyCircleCheckSvg;
+      });
+    }
+
+    var pendingWatch = null;
+
+    function openWatchConfirm(pending, title, desc) {
+      pendingWatch = pending;
+      document.getElementById('confirmModalTitle').textContent = title;
+      document.getElementById('confirmModalDesc').textContent = desc;
       var overlay = document.getElementById('confirmModal');
       springShow(overlay, overlay.querySelector('.action-sheet-card'), 'grid');
     }
 
+    /* the show's tick on the media info card */
+    function promptBulkWatch() {
+      var st = getLocalShowStructure(currentDetailItem);
+      var eps = [];
+      if (st) Object.keys(st.seasons).forEach(function(k) { st.seasons[k].episodes.forEach(function(e) { eps.push(e); }); });
+      if (!eps.length) { showToast('No episodes found in spreadsheet for this show.'); return; }
+      var nowWatched = !eps.every(function(e) { return e.watched; });
+      openWatchConfirm({ scope: 'show', sheetName: st.sheetName, rows: eps.map(function(e) { return e.row; }), newWatched: nowWatched },
+        'Mark all episodes?', 'Do you want to mark all episodes of this show as ' + (nowWatched ? 'watched' : 'unwatched') + '?');
+    }
+
+    /* a season's tick on the media info card */
+    function promptSeasonWatch(n) {
+      var st = getLocalShowStructure(currentDetailItem);
+      var s = st && st.seasons[n];
+      if (!s || !s.episodes.length) { showToast('No episodes found in spreadsheet for Season ' + n + '.'); return; }
+      var nowWatched = !s.episodes.every(function(e) { return e.watched; });
+      var rows = s.episodes.map(function(e) { return e.row; });
+      if (s.headerRow) rows.push(s.headerRow);          // the season's own checkbox follows its episodes
+      openWatchConfirm({ scope: 'season', seasonNum: n, sheetName: st.sheetName, rows: rows, newWatched: nowWatched },
+        'Mark Season ' + n + '?', 'Do you want to mark all episodes of Season ' + n + ' as ' + (nowWatched ? 'watched' : 'unwatched') + '?');
+    }
+
     function closeConfirmModal() {
       var overlay = document.getElementById('confirmModal');
+      pendingWatch = null;
       springHide(overlay, overlay.querySelector('.action-sheet-card'));
     }
 
     function executeBulkWatch() {
+      var p = pendingWatch;
       closeConfirmModal();
-      showToast('Updating all episodes...');
-      // Find all episode row indices for this TV show in rawData.tvShows matching currentDetailItem.tmdbId
-      const showBlock = rawData.tvShows.find(t => t.tmdbId === currentDetailItem.tmdbId || t.title.toLowerCase() === currentDetailItem.title.toLowerCase());
-      // Collect episode row indices from rawData.tvShows starting after show header
-      let episodeRowIndices = [];
-      let collecting = false;
-      rawData.tvShows.forEach(row => {
-        const rawTitle = row.title ? row.title.trim() : '';
-        const isSeasonHeader = /^Season\s+\d+/i.test(rawTitle);
-        const isEpisode = /^S\d+E\d+/i.test(rawTitle);
-        const isShowHeader = !isSeasonHeader && !isEpisode && rawTitle !== '';
+      if (!p || !p.rows.length) { showToast('Nothing to update.'); return; }
+      showToast(p.scope === 'season' ? 'Updating season ' + p.seasonNum + '...' : 'Updating all episodes...');
 
-        if (isShowHeader) {
-          if (row.tmdbId === currentDetailItem.tmdbId || rawTitle.toLowerCase() === currentDetailItem.title.toLowerCase()) {
-            collecting = true;
-          } else if (collecting) {
-            collecting = false;
-          }
-        } else if (collecting && isEpisode) {
-          episodeRowIndices.push(row.rowIndex);
-        }
-      });
+      GAS.run
+        .withSuccessHandler(function(res) {
+          showToast((res && res.message) || 'Updated');
+          if (res && res.queued) renderCurrentCategoryView(); else refreshDataQuietly();
+          if (p.scope === 'show') closeMediaDetail();       // a season update leaves the card open so you can carry on
+        })
+        .withFailureHandler(function(err) {
+          showToast('Could not update: ' + ((err && err.message) || err));
+          refreshDataQuietly();
+        })
+        .apiMarkWatched({ sheetName: p.sheetName, rowIndices: p.rows, isWatched: p.newWatched, dateWatched: p.newWatched ? todayDMYShort() : '' });
 
-      if (episodeRowIndices.length > 0) {
-        GAS.run.withSuccessHandler(res => {
-          showToast(res.message);
-          GAS.run.withSuccessHandler(data => {
-            rawData = data;
-            renderCurrentCategoryView();
-            closeMediaDetail();
-          }).getWebAppData();
-        }).apiMarkWatched({ sheetName: 'TV shows', rowIndices: episodeRowIndices, isWatched: true });
-      } else {
-        showToast('No episodes found in spreadsheet for this show.');
-      }
+      syncDetailTicks();             // the change is already in the local data, so the ticks update at once
+      renderCurrentCategoryView();
     }
 
 
@@ -2754,6 +2824,7 @@ let currentDetailItem = null;
       executeBulkWatch: function() { executeBulkWatch(); },
       closeConfirmModal: function() { closeConfirmModal(); },
       promptBulkWatch: function() { promptBulkWatch(); },
+      seasonTick: function(el) { promptSeasonWatch(parseInt(el.dataset.a, 10)); },
       refreshData: function() { refreshData(); },
 
       switchMainCategory: function(el) { switchMainCategory(el.dataset.a, el); },
