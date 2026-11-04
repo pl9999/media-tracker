@@ -787,6 +787,16 @@
   transition: transform 0.15s ease, color 0.15s ease, background 0.15s ease;
 }
 .rec-btn svg { width: 20px; height: 20px; }
+/* Recommendation cards (Explore, list view): the buttons sit under the text so every line gets the full width */
+.rec-card { align-items: flex-start; }
+.rec-card .card-info { gap: 0.2rem; padding-right: 0; }
+.rec-card .card-title-text { white-space: normal; overflow: visible; text-overflow: clip; overflow-wrap: anywhere; line-height: 1.25; }
+.card-genre-line { font-size: 0.82rem; color: var(--text-sub); line-height: 1.3; }
+.rec-card .rec-actions { margin-top: 0.45rem; gap: 1.1rem; justify-content: flex-start; }
+.rec-card .rec-btn { width: 48px; height: 48px; }
+.rec-card .rec-btn svg { width: 34px; height: 34px; }
+.bingers-grid-card .rec-btn { width: 36px; height: 36px; }
+.bingers-grid-card .rec-btn svg { width: 24px; height: 24px; }
 .rec-btn:active { transform: scale(0.85); }
 .rec-btn.rec-add:hover, .rec-btn.rec-add:active { color: #0a84ff; background: rgba(10,132,255,0.15); }
 .rec-btn.rec-watched:hover, .rec-btn.rec-watched:active { color: #34c759; background: rgba(52,199,89,0.15); }
@@ -924,6 +934,18 @@
 }
 .trailer-link svg { width: 22px; height: 22px; }
 .detail-director { font-size: 0.95rem; color: #e5e5ea; }
+
+/* ---------- Confirm pop-up above the media info card; season tick ---------- */
+/* the media info card is z-index 5000: the "Mark all episodes?" pop-up must sit above it or it only shows after you leave the card */
+#confirmModal.modal-overlay { z-index: 5600; }
+.season-header-right { display: flex; align-items: center; gap: 0.6rem; }
+.season-tick {
+  width: 34px; height: 34px; flex-shrink: 0; border: none; background: transparent; padding: 0;
+  display: flex; align-items: center; justify-content: center; cursor: pointer; transition: transform 0.15s ease;
+}
+.season-tick svg { width: 26px; height: 26px; }
+.season-tick:active { transform: scale(0.88); }
+.season-tick.animating-tick { transform: scale(1.35); }
 
 /* ---------- Access code prompt ---------- */
 .login-overlay {
@@ -1289,6 +1311,6 @@
     </div>
   </div>
 
-  <script src="app.js?v=23"></script>
+  <script src="app.js?v=20"></script>
 </body>
 </html>
