@@ -11,7 +11,8 @@
        carry the access code, which is entered once on each device and
        is never stored in this repository.
        ================================================================ */
-    var GAS_URL = 'https://script.google.com/macros/s/AKfycbwfd2iJxgw95mahjKQc7hVh-8XIs18hO2nxfTW8Ogww7JdhP_cOxWwGI5g8t3uSf8A1/exec';
+   var GAS_URL = 'https://script.google.com/macros/s/AKfycbwfd2iJxgw95mahjKQc7hVh-8XIs18hO2nxfTW8Ogww7JdhP_cOxWwGI5g8t3uSf8A1/exec';
+
 
     var ACCESS_KEY = 'mt_access_code';
     var memoryAccessCode = '';
@@ -1516,54 +1517,31 @@ function renderTvSectionGroup(container, sectionTitle, items, viewMode, isHistor
 
     function handleActionToggleWatched() {
       if (!activeItemTarget) return;
-      var newWatched = !activeItemTarget.isWatched;
-
-      showToast('Updating status...');
+      var t = activeItemTarget;          // closeActionSheet() clears activeItemTarget, so keep what we need first
       closeActionSheet();
-
-      GAS.run.withSuccessHandler(function(res) {
-        showToast(res.message);
-        GAS.run.withSuccessHandler(onDataLoaded).getWebAppData();
-      }).apiMarkWatched({
-        sheetName: activeItemTarget.sheetName,
-        rowIndices: [activeItemTarget.rowIndex],
-        isWatched: newWatched,
-        dateWatched: newWatched ? new Date().toLocaleDateString('en-GB') : ''
-      });
+      markWatchedQuietly(t.sheetName, [t.rowIndex], !t.isWatched);
+      renderCurrentCategoryView();
     }
 
     function handleActionRewatched() {
       if (!activeItemTarget) return;
-      showToast('Recording rewatch...');
+      var t = activeItemTarget;
       closeActionSheet();
-
-      GAS.run.withSuccessHandler(function(res) {
-        showToast('Rewatch recorded.');
-        GAS.run.withSuccessHandler(onDataLoaded).getWebAppData();
-      }).apiMarkWatched({
-        sheetName: activeItemTarget.sheetName,
-        rowIndices: [activeItemTarget.rowIndex],
-        isWatched: true,
-        dateWatched: new Date().toLocaleDateString('en-GB')
-      });
+      markWatchedQuietly(t.sheetName, [t.rowIndex], true);       // watched again, dated today
+      renderCurrentCategoryView();
     }
 
     function handleActionEditDate() {
       if (!activeItemTarget) return;
       var newDate = prompt('Enter watch date (DD/MM/YY):', todayDMYShort());
-      if (newDate) {
-        showToast('Updating date...');
-        closeActionSheet();
-
-        GAS.run.withSuccessHandler(function(res) {
-          showToast(res.message);
-          GAS.run.withSuccessHandler(onDataLoaded).getWebAppData();
-        }).apiEditWatchDate({
-          sheetName: activeItemTarget.sheetName,
-          rowIndices: [activeItemTarget.rowIndex],
-          newDate: newDate
-        });
-      }
+      if (!newDate) return;
+      var t = activeItemTarget;
+      closeActionSheet();
+      GAS.run
+        .withSuccessHandler(function(res) { if (res && res.success === false) showToast(res.message || 'Could not update the date'); })
+        .withFailureHandler(function(err) { showToast('Could not update the date: ' + ((err && err.message) || err)); })
+        .apiEditWatchDate({ sheetName: t.sheetName, rowIndices: [t.rowIndex], newDate: newDate });
+      renderCurrentCategoryView();
     }
 
     function openAddModal() {
@@ -1776,6 +1754,26 @@ function renderTvSectionGroup(container, sectionTitle, items, viewMode, isHistor
     });
 }
 
+/* Marking an item watched / not watched.
+   The change is sent the moment you tap, so the server works while the card animates away, and the list is redrawn
+   straight from the app's own data (already updated): nothing waits for the server and the whole library is not
+   downloaded again. A message appears only if something goes wrong. */
+function markWatchedQuietly(sheetName, rows, watched) {
+  GAS.run
+    .withSuccessHandler(function(res) {
+      if (res && res.success === false) showToast(res.message || 'Could not update');
+    })
+    .withFailureHandler(function(err) {
+      showToast('Could not update status: ' + ((err && err.message) || err));
+    })
+    .apiMarkWatched({
+      sheetName: sheetName,
+      rowIndices: rows,
+      isWatched: watched,
+      dateWatched: watched ? new Date().toLocaleDateString('en-GB') : ''
+    });
+}
+
 function toggleWatchedDirectly(event, sheetName, rowIndex, isWatched) {
   event.stopPropagation();
   var newWatched = !isWatched;
@@ -1783,42 +1781,15 @@ function toggleWatchedDirectly(event, sheetName, rowIndex, isWatched) {
   var btn = event.currentTarget;
   var card = btn.closest('.bingers-list-card') || btn.closest('.bingers-grid-card');
 
-  // Step 1: Trigger the scale-up pulse and swap to the green checkmark
+  // the tick pulses and turns green, then the card slides away
   btn.classList.add('animating-tick');
   btn.innerHTML = greenCheckSvg;
+  setTimeout(function() { btn.classList.remove('animating-tick'); }, 160);
+  setTimeout(function() { if (card) card.classList.add('animating-out'); }, 260);
 
-  // Step 2: Settle back to normal size briefly, then trigger card exit animation
-  setTimeout(function() {
-    btn.classList.remove('animating-tick');
-  }, 160);
-
-  setTimeout(function() {
-    if (card) {
-      card.classList.add('animating-out');
-    }
-  }, 260);
-
-  // Step 3: Fire backend API call and refresh view after animation completes
-  setTimeout(function() {
-    GAS.run
-      .withSuccessHandler(function(res) {
-        showToast(res.message || 'Updated successfully');
-        GAS.run.withSuccessHandler(function(data) {
-          rawData = data;
-          renderCurrentCategoryView();
-        }).getWebAppData();
-      })
-      .withFailureHandler(function(err) {
-        alert('Error updating status: ' + err.message);
-        renderCurrentCategoryView(); // Revert view on error
-      })
-      .apiMarkWatched({
-        sheetName: sheetName,
-        rowIndices: [parseInt(rowIndex, 10)],
-        isWatched: newWatched,
-        dateWatched: newWatched ? new Date().toLocaleDateString('en-GB') : ''
-      });
-  }, 420); // Total animation window before data refresh
+  // send it now (the app's own data is updated at once) and redraw as soon as the card has gone
+  markWatchedQuietly(sheetName, [parseInt(rowIndex, 10)], newWatched);
+  setTimeout(renderCurrentCategoryView, 420);
 }
 
 let currentDetailItem = null;
@@ -2084,7 +2055,6 @@ let currentDetailItem = null;
             showToast((res && res.message) || 'Could not update episode');
             return;
           }
-          refreshDataQuietly();
         })
         .withFailureHandler(function(err) {
           btn.dataset.busy = '0';
@@ -2097,6 +2067,7 @@ let currentDetailItem = null;
           isWatched: newWatched,
           dateWatched: newWatched ? new Date().toLocaleDateString('en-GB') : ''
         });
+      renderCurrentCategoryView();   // lists behind the card show the change at once
     }
 
     function handleAddToList(typeStr, tmdbId) {
@@ -2147,9 +2118,7 @@ let currentDetailItem = null;
 
       GAS.run
         .withSuccessHandler(function(res) {
-          showToast((res && res.message) || 'Updated');
-          renderCurrentCategoryView();            // the list behind the card reflects the change
-          if (!res || !res.queued) refreshDataQuietly();
+          if (res && res.success === false) showToast(res.message || 'Could not update');   // only a refusal needs a message
         })
         .withFailureHandler(function() {
           if (btn) {
@@ -2159,6 +2128,7 @@ let currentDetailItem = null;
           showToast('Could not update status');
         })
         .apiMarkWatched({ sheetName: 'Movies', rowIndices: [rowIndex], isWatched: newWatched, dateWatched: newWatched ? new Date().toLocaleDateString('en-GB') : '' });
+      renderCurrentCategoryView();            // the list behind the card reflects the change at once
     }
 
     /* The TV show's rows in your spreadsheet: show header, season headers and episodes (null if it is not in the sheet) */
@@ -2266,13 +2236,9 @@ let currentDetailItem = null;
       var p = pendingWatch;
       closeConfirmModal();
       if (!p || !p.rows.length) { showToast('Nothing to update.'); return; }
-      showToast(p.scope === 'season' ? 'Updating season ' + p.seasonNum + '...' : 'Updating all episodes...');
-
       GAS.run
         .withSuccessHandler(function(res) {
-          showToast((res && res.message) || 'Updated');
-          if (res && res.queued) renderCurrentCategoryView(); else refreshDataQuietly();
-          if (p.scope === 'show') closeMediaDetail();       // a season update leaves the card open so you can carry on
+          if (res && res.success === false) showToast(res.message || 'Could not update');
         })
         .withFailureHandler(function(err) {
           showToast('Could not update: ' + ((err && err.message) || err));
@@ -2282,6 +2248,7 @@ let currentDetailItem = null;
 
       syncDetailTicks();             // the change is already in the local data, so the ticks update at once
       renderCurrentCategoryView();
+      if (p.scope === 'show') closeMediaDetail();       // a season update leaves the card open so you can carry on
     }
 
 
