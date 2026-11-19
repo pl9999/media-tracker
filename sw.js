@@ -18,17 +18,25 @@ self.addEventListener('fetch', function(event) {
   var url = new URL(req.url);
   if (url.origin !== self.location.origin) return;   // TMDB images and the backend are never touched
 
-  event.respondWith(
+  // Network first (so you get new versions), but on a slow connection fall back to the saved copy after 1.5 seconds
+  // instead of leaving the app waiting.
+  event.respondWith(new Promise(function(resolve) {
+    var settled = false;
+    function done(res) { if (!settled && res) { settled = true; resolve(res); } }
+    var timer = setTimeout(function() { caches.match(req).then(done); }, 1500);
+
     fetch(req).then(function(res) {
+      clearTimeout(timer);
       if (res && res.ok) {
         var copy = res.clone();
         caches.open(CACHE).then(function(c) { c.put(req, copy); });
       }
-      return res;
+      done(res);
     }).catch(function() {
-      return caches.match(req).then(function(hit) {
-        return hit || caches.match('index.html') || caches.match('./');
-      });
-    })
-  );
+      clearTimeout(timer);
+      caches.match(req)
+        .then(function(hit) { return hit || caches.match('index.html'); })
+        .then(function(hit) { done(hit || Response.error()); });
+    });
+  }));
 });
