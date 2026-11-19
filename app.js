@@ -11,8 +11,7 @@
        carry the access code, which is entered once on each device and
        is never stored in this repository.
        ================================================================ */
-   var GAS_URL = 'https://script.google.com/macros/s/AKfycbwfd2iJxgw95mahjKQc7hVh-8XIs18hO2nxfTW8Ogww7JdhP_cOxWwGI5g8t3uSf8A1/exec';
-
+    var GAS_URL = 'https://script.google.com/macros/s/AKfycbwfd2iJxgw95mahjKQc7hVh-8XIs18hO2nxfTW8Ogww7JdhP_cOxWwGI5g8t3uSf8A1/exec';
 
     var ACCESS_KEY = 'mt_access_code';
     var memoryAccessCode = '';
@@ -233,10 +232,12 @@
 
     function applyLoadedData(data) {
       applyPendingToData(data);   // updates made offline stay visible until they have synced
+      applyRecentToData(data);    // ...and so do taps from the last minutes that the server may not have reflected yet
       rawData = data;
       persistAccessCode();
       saveSnapshot();
       lastLoadedAt = new Date();
+      lastBackgroundRefresh = Date.now();
       if (data.settings && !settingsDirty) {
         appSettings.resumeWeeks = data.settings.resumeWeeks || appSettings.resumeWeeks;
       }
@@ -1062,35 +1063,41 @@
     }
 
     /* Quick actions on a recommendation: add to list / mark watched / remove */
+    /* Quick actions on a recommendation: add to list / mark watched / remove.
+       The card goes at once (and the item leaves the local list); the real work happens in the background and a
+       message only appears if it fails. The library is refreshed quietly afterwards. */
     function recAction(typeStr, id, action, btn) {
       if (!navigator.onLine) { showToast('You need to be online to do that'); return; }
       var card = btn.closest('.bingers-list-card') || btn.closest('.bingers-grid-card');
       if (card && card.dataset.busy === '1') return;
-      var titleEl = card ? (card.querySelector('.card-title-text') || card.querySelector('.grid-card-title')) : null;
-      var title = titleEl ? titleEl.textContent : 'Item';
-      if (card) { card.dataset.busy = '1'; card.style.opacity = '0.6'; }
-      if (action !== 'remove') showAddPopup('loading', title, typeStr);
+      if (card) { card.dataset.busy = '1'; card.classList.add('animating-out'); }
+
+      var listName = typeStr === 'movie' ? 'movieRecommendations' : 'tvRecommendations';
+      var removed = [];
+      rawData[listName] = (rawData[listName] || []).filter(function(r) {
+        if (String(r.tmdbId || '').replace(/\D/g, '') === String(id)) { removed.push(r); return false; }
+        return true;
+      });
+      var mark = { list: listName, id: String(id), t: Date.now() };
+      recentRecRemovals.push(mark);
+      saveSnapshotSoon();
+      setTimeout(renderCurrentCategoryView, 320);          // once the card has slid away
+
+      function putBack(message) {
+        var i = recentRecRemovals.indexOf(mark);
+        if (i !== -1) recentRecRemovals.splice(i, 1);
+        removed.forEach(function(r) { rawData[listName].push(r); });
+        showToast(message);
+        renderCurrentCategoryView();
+        refreshInBackground();                               // put everything back in its proper order
+      }
 
       GAS.run
         .withSuccessHandler(function(res) {
-          if (card) card.dataset.busy = '0';
-          if (res && res.success) {
-            if (action === 'remove') showToast(res.message || 'Removed');
-            else showAddPopup('success', res.title || title, typeStr, null, res.message);
-            if (card) card.classList.add('animating-out');
-            setTimeout(refreshDataQuietly, 350);   // refresh the recommendations lists
-          } else {
-            if (card) card.style.opacity = '';
-            var msg = (res && res.message) || 'Something went wrong';
-            if (action === 'remove') showToast(msg); else showAddPopup('error', title, typeStr, msg);
-            refreshDataQuietly();
-          }
+          if (res && res.success) { scheduleBackgroundRefresh(1200); return; }   // quietly bring the library up to date
+          putBack((res && res.message) || 'Something went wrong');
         })
-        .withFailureHandler(function(err) {
-          if (card) { card.dataset.busy = '0'; card.style.opacity = ''; }
-          var msg = (err && err.message) || 'Something went wrong';
-          if (action === 'remove') showToast(msg); else showAddPopup('error', title, typeStr, msg);
-        })
+        .withFailureHandler(function(err) { putBack('Could not complete that: ' + ((err && err.message) || err)); })
         .apiRecommendationAction(typeStr, id, action);
     }
 
@@ -1585,6 +1592,7 @@ function renderTvSectionGroup(container, sectionTitle, items, viewMode, isHistor
               openMediaDetail({
                 title: item.title,
                 tmdbId: item.id,
+                poster: item.poster || '',
                 type: type,
                 date: isoToDMY(item.date),
                 synopsis: item.overview || '',
@@ -1803,25 +1811,40 @@ let currentDetailItem = null;
       document.getElementById('detailTitle').innerText = item.title;
       const hero = document.getElementById('detailHero');
       hero.style.backgroundImage = 'none';
+      hero.dataset.src = '';
+      hero.dataset.want = '';
 
-      // Fetch live TMDb details for rich media info
-      const typeStr = (item.type && item.type.toLowerCase().includes('movie')) ? 'movie' : 'tv';
+      const typeStr = item.type.toLowerCase().includes('movie') ? 'movie' : 'tv';
       const tmdbId = item.tmdbId;
+      const validId = !!tmdbId && /^\d{1,10}$/.test(String(tmdbId));
+      const idStr = validId ? String(tmdbId) : '';
 
-      if (tmdbId && /^\d{1,10}$/.test(String(tmdbId))) {
-        GAS.run
-          .withSuccessHandler(function(data) {
-            if (currentDetailItem !== item) return;
-            renderDetailContent(item, data, typeStr);
-          })
-          .withFailureHandler(function() {
-            if (currentDetailItem !== item) return;
-            renderDetailContent(item, null, typeStr);
-          })
-          .apiTmdbDetails(typeStr, String(tmdbId));
-      } else {
-        renderDetailContent(item, null, typeStr);
+      // 1) a picture straight away: the poster already found for the list, instead of waiting for the lookup
+      var quick = quickPosterUrl(typeStr, idStr, item);
+      if (quick) {
+        hero.style.backgroundImage = "url('" + quick + "')";
+        hero.dataset.src = quick;
+        hero.dataset.want = quick;
       }
+
+      // 2) the text straight away: from the saved lookup if there is one, otherwise from your own data
+      var cached = validId ? getCachedDetails(typeStr, idStr) : null;
+      renderDetailContent(item, cached ? cached.d : null, typeStr);
+
+      if (!validId) return;
+      if (cached && Date.now() - cached.t < DETAILS_FRESH_MS) return;      // recent enough: no need to ask again
+
+      // 3) the full lookup (cast, seasons, trailer, better artwork) fills in when it arrives
+      GAS.run
+        .withSuccessHandler(function(data) {
+          if (!data) return;
+          putCachedDetails(typeStr, idStr, data);
+          if (currentDetailItem !== item) return;
+          if (cached && JSON.stringify(cached.d) === JSON.stringify(data)) return;
+          renderDetailContent(item, data, typeStr);
+        })
+        .withFailureHandler(function() { /* keep what is showing */ })
+        .apiTmdbDetails(typeStr, idStr);
     }
 
     function closeMediaDetail() {
@@ -1834,9 +1857,9 @@ let currentDetailItem = null;
       var hero = document.getElementById('detailHero');
       var safeTmdbId = String(item.tmdbId || '').replace(/\D/g, '');
 
-      var backdropPath = tmdbData && tmdbImgPath(tmdbData.backdrop_path) ? 'https://image.tmdb.org/t/p/w1280' + tmdbImgPath(tmdbData.backdrop_path) : '';
+      var backdropPath = tmdbData && tmdbImgPath(tmdbData.backdrop_path) ? 'https://image.tmdb.org/t/p/w780' + tmdbImgPath(tmdbData.backdrop_path) : '';
       var posterPath = tmdbData && tmdbImgPath(tmdbData.poster_path) ? 'https://image.tmdb.org/t/p/w500' + tmdbImgPath(tmdbData.poster_path) : '';
-      hero.style.backgroundImage = backdropPath ? 'url(\'' + backdropPath + '\')' : (posterPath ? 'url(\'' + posterPath + '\')' : 'none');
+      setHeroImage(hero, backdropPath || posterPath);       // the picture already showing stays until the better one has loaded
 
       var isInList = false;
       var matchingSheetRow = null;
@@ -2368,6 +2391,8 @@ let currentDetailItem = null;
       var params = JSON.parse(JSON.stringify(args[0] || {}));
       params.keys = buildKeys(params);
       applyChangeTo(rawData, name, params);        // screens show the change straight away
+      var recent = rememberRecentChange(name, params);
+      saveSnapshotSoon();
 
       var entry = { id: Date.now() + '-' + Math.random().toString(36).slice(2, 8), action: name, params: params };
       var q = readQueue();
@@ -2382,12 +2407,13 @@ let currentDetailItem = null;
 
       gasCall(name, [params]).then(
         function(res) {
-          if (res && res.success === false) refreshDataQuietly();   // server refused: show the real state again
+          if (res && res.success === false) { forgetRecentChange(recent); refreshDataQuietly(); }   // server refused: show the real state again
           onOk(res);
         },
         function(err) {
           if (err && err.unauthorized) { clearAccessCode(); showLogin('Sign in again to continue.'); onFail(err); return; }
           if (isNetworkError(err)) { queueIt('Saved offline \u2013 will sync when you are back online'); return; }
+          forgetRecentChange(recent);
           refreshDataQuietly();
           onFail(err);
         }
@@ -2433,14 +2459,29 @@ let currentDetailItem = null;
       })();
     }
 
+    function buildSnapshotObject(slim) {
+      function strip(list) {
+        if (!slim) return list;
+        return list.map(function(r) { var c = {}; for (var k in r) { if (k !== 'synopsis') c[k] = r[k]; } return c; });
+      }
+      return {
+        movies: strip(rawData.movies), tvShows: strip(rawData.tvShows),
+        movieRecommendations: strip(rawData.movieRecommendations || []), tvRecommendations: strip(rawData.tvRecommendations || []),
+        settings: appSettings
+      };
+    }
+
+    var snapshotTimer = null;
     function saveSnapshot() {
-      try {
-        localStorage.setItem(SNAPSHOT_KEY, JSON.stringify({
-          movies: rawData.movies, tvShows: rawData.tvShows,
-          movieRecommendations: rawData.movieRecommendations, tvRecommendations: rawData.tvRecommendations,
-          settings: appSettings
-        }));
-      } catch (e) { /* too big for this browser's storage: offline start-up just won't be available */ }
+      try { localStorage.setItem(SNAPSHOT_KEY, JSON.stringify(buildSnapshotObject(false))); return; } catch (e) { /* storage full? try a slimmer copy */ }
+      try { localStorage.setItem(SNAPSHOT_KEY, JSON.stringify(buildSnapshotObject(true))); } catch (e2) {}
+    }
+    function saveSnapshotSoon() {
+      clearTimeout(snapshotTimer);
+      snapshotTimer = setTimeout(saveSnapshot, 1500);
+    }
+    function snapshotSignature() {
+      try { return JSON.stringify(buildSnapshotObject(false)); } catch (e) { return ''; }
     }
 
     function loadSnapshot() {
@@ -2458,12 +2499,20 @@ let currentDetailItem = null;
     }
 
     function clearSnapshot() {
-      try { localStorage.removeItem(SNAPSHOT_KEY); } catch (e) {}
+      try { localStorage.removeItem(SNAPSHOT_KEY); localStorage.removeItem('mt_details_v1'); } catch (e) {}
+      detailsStore = {};
     }
 
     window.addEventListener('online', function() { updateSyncBanner(); flushQueueSoon(); });
     window.addEventListener('offline', updateSyncBanner);
-    document.addEventListener('visibilitychange', function() { if (!document.hidden) flushQueueSoon(); });
+    document.addEventListener('visibilitychange', function() {
+      if (document.hidden) return;
+      flushQueueSoon();
+      if (Date.now() - lastBackgroundRefresh > 120000) refreshInBackground();   // back after a while: update quietly
+    });
+    window.addEventListener('pageshow', function(e) {
+      if (e.persisted && Date.now() - lastBackgroundRefresh > 120000) refreshInBackground();
+    });
     setInterval(function() { if (readQueue().length) flushQueueSoon(); }, 30000);
 
     /* ================================================================
@@ -2759,6 +2808,122 @@ let currentDetailItem = null;
     }
 
     /* ================================================================
+       Speed: show saved data at once, refresh quietly, saved media lookups
+       ================================================================ */
+    var recentChanges = [];        // taps made in the last couple of minutes: {action, params, t}
+    var recentRecRemovals = [];    // recommendations taken off the list in the last couple of minutes: {list, id, t}
+    var RECENT_MS = 120000;
+
+    function pruneRecents() {
+      var cutoff = Date.now() - RECENT_MS;
+      recentChanges = recentChanges.filter(function(c) { return c.t > cutoff; });
+      recentRecRemovals = recentRecRemovals.filter(function(c) { return c.t > cutoff; });
+    }
+    function rememberRecentChange(action, params) {
+      pruneRecents();
+      var c = { action: action, params: params, t: Date.now() };
+      recentChanges.push(c);
+      return c;
+    }
+    function forgetRecentChange(c) {
+      var i = recentChanges.indexOf(c);
+      if (i !== -1) recentChanges.splice(i, 1);
+    }
+    function applyRecentToData(data) {
+      pruneRecents();
+      recentChanges.forEach(function(c) { applyChangeTo(data, c.action, c.params); });
+      recentRecRemovals.forEach(function(r) {
+        data[r.list] = (data[r.list] || []).filter(function(x) { return String(x.tmdbId || '').replace(/\D/g, '') !== r.id; });
+      });
+    }
+
+    function anyOverlayOpen() {
+      return ['popoverOverlay', 'actionSheetOverlay', 'addModal', 'confirmModal', 'mediaDetailOverlay', 'addPopupOverlay'].some(function(id) {
+        var el = document.getElementById(id);
+        return !!el && el.style.display !== '' && el.style.display !== 'none';
+      });
+    }
+
+    /* redraw, but not underneath a menu / card you are using: wait until it has been closed */
+    function renderWhenIdle(tries) {
+      tries = tries || 0;
+      if (!anyOverlayOpen() || tries >= 8) { renderCurrentCategoryView(); return; }
+      setTimeout(function() { renderWhenIdle(tries + 1); }, 1500);
+    }
+
+    var backgroundRefreshing = false, refreshQueued = false, lastBackgroundRefresh = 0, bgRefreshTimer = null;
+
+    /* Get the latest library without any loading screen. The view is only redrawn if something actually changed. */
+    function refreshInBackground() {
+      if (!navigator.onLine || !getAccessCode()) return;
+      if (backgroundRefreshing) { refreshQueued = true; return; }
+      backgroundRefreshing = true;
+      lastBackgroundRefresh = Date.now();
+      var before = snapshotSignature();
+      GAS.run
+        .withSuccessHandler(function(data) {
+          backgroundRefreshing = false;
+          applyLoadedData(data);
+          if (snapshotSignature() !== before) renderWhenIdle(0);
+          syncDetailTicks();
+          if (refreshQueued) { refreshQueued = false; refreshInBackground(); }
+        })
+        .withFailureHandler(function() { backgroundRefreshing = false; refreshQueued = false; })   // offline / slow: keep what is on screen
+        .getWebAppData();
+    }
+
+    function scheduleBackgroundRefresh(delayMs) {
+      clearTimeout(bgRefreshTimer);
+      bgRefreshTimer = setTimeout(refreshInBackground, delayMs);
+    }
+
+    /* saved TMDB lookups (cast, trailer, seasons...): reopening a card is instant, and the lookup is refreshed quietly */
+    var DETAILS_KEY = 'mt_details_v1';
+    var DETAILS_FRESH_MS = 30 * 60 * 1000;
+    var DETAILS_MAX_AGE_MS = 7 * 24 * 3600 * 1000;
+    var DETAILS_KEEP = 40;
+    var detailsStore = {};
+    var detailsSaveTimer = null;
+    try { detailsStore = JSON.parse(localStorage.getItem(DETAILS_KEY) || '{}') || {}; } catch (e) { detailsStore = {}; }
+
+    function getCachedDetails(typeStr, id) {
+      var e = detailsStore[typeStr + '_' + id];
+      return (e && e.d && Date.now() - e.t < DETAILS_MAX_AGE_MS) ? e : null;
+    }
+    function putCachedDetails(typeStr, id, d) {
+      detailsStore[typeStr + '_' + id] = { t: Date.now(), d: d };
+      var keys = Object.keys(detailsStore);
+      if (keys.length > DETAILS_KEEP) {
+        keys.sort(function(a, b) { return detailsStore[a].t - detailsStore[b].t; })
+            .slice(0, keys.length - DETAILS_KEEP).forEach(function(k) { delete detailsStore[k]; });
+      }
+      clearTimeout(detailsSaveTimer);
+      detailsSaveTimer = setTimeout(function() {
+        try { localStorage.setItem(DETAILS_KEY, JSON.stringify(detailsStore)); } catch (e) {}
+      }, 800);
+    }
+
+    /* the poster found for the list (kept on the device) can be shown the moment a card opens */
+    function quickPosterUrl(typeStr, id, item) {
+      var p = tmdbImgPath(item && item.poster);
+      if (!p && id) { var e = posterStore[typeStr + '_' + id]; if (e && tmdbImgPath(e.p)) p = e.p; }
+      return p ? 'https://image.tmdb.org/t/p/w500' + p : '';
+    }
+
+    /* swap the big picture only once the better one has loaded, so it never goes blank */
+    function setHeroImage(hero, url) {
+      if (!url || hero.dataset.src === url) return;
+      hero.dataset.want = url;
+      var img = new Image();
+      img.onload = function() {
+        if (hero.dataset.want !== url) return;
+        hero.style.backgroundImage = "url('" + url + "')";
+        hero.dataset.src = url;
+      };
+      img.src = url;
+    }
+
+    /* ================================================================
        Delegated click handling.
        Nothing in the markup contains inline JavaScript any more: elements
        carry data-act (+ data-a / data-b / data-c values, always HTML-escaped
@@ -2869,7 +3034,8 @@ let currentDetailItem = null;
         try { history.replaceState(null, '', location.pathname + location.search); } catch (e) {}
       }
       if (getAccessCode()) {
-        if (!navigator.onLine && loadSnapshot()) showLibrary();   // offline start-up: use the last saved data
+        // Show the saved copy at once (no "Loading library..." wait) and bring it up to date quietly in the background.
+        if (loadSnapshot()) { showLibrary(); refreshInBackground(); }
         else startLoad();
       } else {
         showLogin('');
